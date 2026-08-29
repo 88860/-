@@ -1,19 +1,20 @@
 #!/bin/bash
 # ==============================================================================
 # Debian 13 (Trixie) Native Optimizer
-# 中文输出 / 四阶段架构 / 零新建 Debian 原生优化配置
+# 中文输出 / 五阶段架构 / 零新建 Debian 原生优化配置
 #
-# 1. 更换 XanMod 内核
+# 1. 更换 XanMod 内核 (已修复 CPU 架构探测，支持 v1 兜底)
 # 2. 系统更新 + TCP/BBR/FQ + Journald/Logrotate 优化
 # 3. 一键清理日志、垃圾、旧内核及常见残留
-# 4. 只读真实性审计
+# 4. 一键 DD 全新 Debian 13 系统
+# 5. 只读真实性审计
 #
 # 设计原则：
 # - Debian 原生优化模块不创建新的 sysctl/journald/logrotate 配置文件。
 # - 只有当目标参数已经存在于实际配置链中时，才进行原位精准修改。
 # - 不把 runtime-only 的 sysctl -w 当成“持久化成功”。
 # - XanMod 是唯一明确允许创建第三方 APT keyring/source 文件的模块。
-# - 选项 4 完全只读，不修改系统。
+# - 选项 5 完全只读，不修改系统。
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -144,7 +145,6 @@ ensure_basic_tools() {
             grep -q 'install ok installed' || missing+=("$pkg")
     done
 
-    # 去重
     if ((${#missing[@]})); then
         local unique=()
         local x seen
@@ -207,18 +207,10 @@ list_sysctl_files() {
 
 sysctl_effective_source() {
     local key="$1"
-    local best="" f base
-    local key_re
-    key_re="${key//./[.]}"
-    local files=()
-    while IFS= read -r f; do files+=("$f"); done < <(list_sysctl_files | sort -u)
-
-    # systemd-sysctl/sysctl.d 的同名文件优先级：
-    # /etc > /run > /usr/local/lib > /usr/lib > /lib
-    # 对于不同文件名，按 basename 字典序，后加载者覆盖前者。
-    # 这里按实际路径层级 + basename 排序，并保留最后命中的管理员文件。
+    local best="" f
     local -a ordered=()
     local d
+
     for d in "${SYSCTL_DIRS[@]}"; do
         [[ -d "$d" ]] || continue
         for f in "$d"/*.conf; do
@@ -226,7 +218,7 @@ sysctl_effective_source() {
         done
     done
 
-    local i line k v
+    local line k v
     for f in "${ordered[@]}"; do
         while IFS= read -r line || [[ -n "$line" ]]; do
             line="${line#"${line%%[![:space:]]*}"}"
@@ -367,17 +359,12 @@ optimize_tcp() {
         skip "当前运行内核没有 BBR；不创建模块加载配置，不创建 sysctl 配置。"
     fi
 
-    # 只优化已经存在的管理员配置项。
-    # 如果不存在，绝不创建新文件。
     if grep -qw bbr <<<"$avail"; then
         modify_existing_sysctl "net.ipv4.tcp_congestion_control" "bbr"
     fi
 
-    # FQ 只在已经存在管理员配置项时修改。
-    # 不为了“优化”而新建 sysctl 配置。
     modify_existing_sysctl "net.core.default_qdisc" "fq"
 
-    # 以下参数不作为强制优化项，避免把 Debian 默认值误称为性能优化。
     info "somaxconn / tcp_max_syn_backlog / ip_local_port_range 不强制改写；仅审计其实际值和来源。"
 
     reload_sysctl
@@ -520,7 +507,6 @@ optimize_journald() {
         warn "没有发现现有 journald 配置文件。"
     fi
 
-    # 坚持“不新建配置文件”：只修改已存在的管理员项目。
     modify_existing_journald SystemMaxUse "$JOURNAL_MAX_USE"
     modify_existing_journald SystemMaxFileSize "$JOURNAL_MAX_FILE_SIZE"
     modify_existing_journald SystemMaxFiles "$JOURNAL_MAX_FILES"
@@ -649,7 +635,6 @@ cleanup_rotated_logs() {
     local count=0 f
 
     while IFS= read -r -d '' f; do
-        # 只处理 /var/log 下常见轮转残留
         safe_remove_file "$f"
         ((count+=1))
         printf '  %b %s\n' "${C_YELLOW}[删除]${C_NC}" "$f"
@@ -666,17 +651,14 @@ cleanup_rotated_logs() {
 
 truncate_active_logs() {
     log "清空普通活动文本日志（保留文件本身和权限）..."
-    local count=0 f base
+    local count=0 f
 
     while IFS= read -r -d '' f; do
-        base="$(basename "$f")"
-
         case "$f" in
             /var/log/journal/*|/run/log/journal/*) continue ;;
             /var/log/wtmp|/var/log/btmp|/var/log/lastlog) continue ;;
         esac
 
-        # 只处理常见文本日志，不碰二进制数据库/目录。
         if file "$f" 2>/dev/null | grep -qiE 'text|empty|ASCII|UTF-8|JSON'; then
             if : > "$f"; then
                 ((count+=1))
@@ -736,22 +718,17 @@ cleanup_old_kernels() {
     pass "当前运行内核: $current"
 
     local packages=()
-    local p ver base
+    local p
     while IFS= read -r p; do
         [[ -n "$p" ]] && packages+=("$p")
     done < <(kernel_package_list)
 
-    # 获取当前包的版本/名称关联；保守策略：
-    # - 不删除任何与当前 uname -r 明确匹配的包
-    # - 优先使用 apt autoremove 处理孤立内核
-    # - 仅对明显旧的、非当前内核包做人工候选提示
     log "执行 APT 原生 autoremove 处理孤立旧内核..."
     apt-get autoremove --purge -y >/dev/null 2>&1 || true
 
     local candidates=()
     for p in "${packages[@]}"; do
         [[ "$p" == *"$current"* ]] && continue
-        # 排除元包，避免误删 linux-image-amd64/linux-headers-amd64 等跟踪包
         case "$p" in
             linux-image-amd64|linux-headers-amd64|linux-image-cloud-amd64|linux-headers-cloud-amd64)
                 continue ;;
@@ -771,15 +748,12 @@ cleanup_old_kernels() {
 cleanup_old_files() {
     log "清理明确的系统垃圾文件..."
     local count=0 f
-
-    # 只在明确安全的临时/备份目录处理，不全盘扫描删除。
     local roots=(/tmp /var/tmp /var/backups)
     local root
 
     for root in "${roots[@]}"; do
         [[ -d "$root" ]] || continue
         while IFS= read -r -d '' f; do
-            # 排除 socket / device 等特殊对象，只处理普通文件
             [[ -f "$f" ]] || continue
             rm -f -- "$f" && {
                 ((count+=1))
@@ -816,12 +790,47 @@ cleanup_all() {
     pass "一键清理完成"
 }
 
+# ------------------------------ 一键 DD ---------------------------------------
+
+reinstall_debian13() {
+    printf '\n%b\n' "${C_RED}====================================================${C_NC}"
+    printf '%b\n' "${C_RED} 危险操作：一键 DD 全新 Debian 13 ${C_NC}"
+    printf '%b\n\n' "${C_RED}====================================================${C_NC}"
+
+    warn "此操作将重新安装系统为官方纯净 Debian 13，全盘数据将被销毁！"
+    printf '%b\n' "  ${C_YELLOW}调用源: https://github.com/bin456789/reinstall${C_NC}"
+    
+    local confirm=""
+    read -r -p "确认执行重装？请输入 YES 并回车: " confirm < /dev/tty || return 0
+    if [[ "$confirm" != "YES" ]]; then
+        skip "已取消重装系统。"
+        return 0
+    fi
+
+    log "下载 reinstall 重装脚本..."
+    ensure_basic_tools
+    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O "${_##*/}" "$_"
+
+    log "启动一键重装到 Debian 13..."
+    bash reinstall.sh debian13
+}
+
 # ------------------------------ XanMod ----------------------------------------
 
+# 修复 CPU 指令集探测，精准支持 v1 兜底，防止低配/虚拟化 CPU 误装 v2/v3 无法开机
 cpu_level() {
     if [[ -x /lib64/ld-linux-x86-64.so.2 ]]; then
-        /lib64/ld-linux-x86-64.so.2 --help 2>/dev/null |
-            grep -oE 'x86-64-v[2-4]' | sort -V | tail -n1 || true
+        local detected
+        detected="$(/lib64/ld-linux-x86-64.so.2 --help 2>/dev/null | grep -oE 'x86-64-v[1-4]' | sort -V | tail -n1 || true)"
+        if [[ "$detected" == "x86-64-v4" || "$detected" == "x86-64-v3" ]]; then
+            echo "x64v3"
+        elif [[ "$detected" == "x86-64-v2" ]]; then
+            echo "x64v2"
+        else
+            echo "x64v1"
+        fi
+    else
+        echo "x64v1"
     fi
 }
 
@@ -840,12 +849,7 @@ install_xanmod() {
 
     local level
     level="$(cpu_level)"
-    if [[ "$level" == "x86-64-v4" || "$level" == "x86-64-v3" ]]; then
-        level="x64v3"
-    else
-        level="x64v2"
-    fi
-    info "CPU ABI 检测结果: ${level}"
+    info "CPU ABI 检测结果: ${level} (已自动匹配兼容包，避免无法开机)"
 
     local keyring="/etc/apt/keyrings/xanmod-archive-keyring.gpg"
     local repo="/etc/apt/sources.list.d/xanmod-release.list"
@@ -879,6 +883,16 @@ install_xanmod() {
     pass "XanMod APT 源验证成功"
 
     local pkg="linux-xanmod-${level}"
+    # 若 LTS/主线源中某版本暂无则智能降级
+    if ! apt-cache show "$pkg" >/dev/null 2>&1; then
+        warn "未找到专属优化包 $pkg，自动安全降级至兼容包..."
+        if apt-cache show "linux-xanmod-lts-x64v1" >/dev/null 2>&1; then
+            pkg="linux-xanmod-lts-x64v1"
+        else
+            pkg="linux-xanmod-x64v2"
+        fi
+    fi
+
     log "安装 XanMod 内核: $pkg"
     apt-get install -y --no-install-recommends "$pkg" ||
         die "XanMod 内核安装失败。"
@@ -903,7 +917,7 @@ install_xanmod() {
     printf '\n%b\n' "${C_GREEN}====================================================${C_NC}"
     printf '%b\n' "${C_GREEN} XanMod 安装完成。现在必须 reboot。${C_NC}"
     printf '%b\n' "${C_GREEN} 重启后再次运行本脚本，然后使用选项 2 优化。${C_NC}"
-    printf '%b\n' "${C_GREEN} 最后使用选项 4 做真实性审计。${C_NC}"
+    printf '%b\n' "${C_GREEN} 最后使用选项 5 做真实性审计。${C_NC}"
     printf '%b\n\n' "${C_GREEN}====================================================${C_NC}"
 }
 
@@ -1110,12 +1124,13 @@ show_banner() {
     printf '%b\n' "${C_CYAN}        Debian 13 (Trixie) Native Optimizer${C_NC}"
     printf '%b\n' "${C_CYAN}        中文输出 / 真实配置链 / 精准持久化${C_NC}"
     printf '%b\n' "${C_CYAN}====================================================${C_NC}"
-    printf '%b\n' "${C_GREEN}  1.${C_NC} 更换 XanMod 内核"
+    printf '%b\n' "${C_GREEN}  1.${C_NC} 更换 XanMod 内核 (已修复 CPU 架构检测)"
     printf '%b\n' "${C_GREEN}     └─ 安装 → 验证 → reboot → 再运行本脚本${C_NC}"
     printf '%b\n' "${C_GREEN}  2.${C_NC} 系统更新 + TCP/BBR/FQ + 日志优化"
     printf '%b\n' "${C_GREEN}     └─ 只修改实际存在的管理员配置项${C_NC}"
     printf '%b\n' "${C_GREEN}  3.${C_NC} 一键清理日志 / 垃圾 / APT / 旧内核残留"
-    printf '%b\n' "${C_GREEN}  4.${C_NC} 真实性审计（完全只读）"
+    printf '%b\n' "${C_GREEN}  4.${C_NC} 一键 DD 重装全新 Debian 13 系统 (危险)"
+    printf '%b\n' "${C_GREEN}  5.${C_NC} 真实性审计（完全只读）"
     printf '%b\n' "${C_RED}  0.${C_NC} 退出"
     printf '%b\n' "${C_CYAN}====================================================${C_NC}"
 }
@@ -1129,19 +1144,20 @@ main() {
     while true; do
         show_banner
         local choice=""
-        read -r -p "请输入 [0-4]: " choice < /dev/tty || exit 0
+        read -r -p "请输入 [0-5]: " choice < /dev/tty || exit 0
 
         case "$choice" in
             1) install_xanmod ;;
             2) optimize_system ;;
             3) cleanup_all ;;
-            4) audit_all ;;
+            4) reinstall_debian13 ;;
+            5) audit_all ;;
             0)
                 printf '%b\n' "${C_GRAY}已安全退出。${C_NC}"
                 exit 0
                 ;;
             *)
-                fail "无效选项，请输入 0-4。"
+                fail "无效选项，请输入 0-5。"
                 ;;
         esac
 
