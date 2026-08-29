@@ -2,8 +2,21 @@
 set -Eeuo pipefail
 export LC_ALL=C
 
+# ============================================================
+# Debian 13 双栈 TCP/UDP 网络调优
+# 只读审计 → 显示实际配置来源 → 人工确认 → 精准修改
+#
+# 重要：
+# 1. 绝不创建新的 sysctl 配置文件
+# 2. 只修改现有的 systemd-sysctl 配置文件
+# 3. 不执行 sysctl -w
+# 4. 不 reload systemd-sysctl
+# 5. 不 modprobe
+# 6. 不重启网络/SSH
+# ============================================================
+
 [[ $EUID -eq 0 ]] || {
-    echo "错误：请使用 root 运行。"
+    echo "错误：必须使用 root 运行。"
     exit 1
 }
 
@@ -24,10 +37,6 @@ RED=$'\033[31m'
 CYAN=$'\033[36m'
 RESET=$'\033[0m'
 
-info() {
-    printf '%b\n' "${CYAN}$*${RESET}"
-}
-
 ok() {
     printf '%b\n' "${GREEN}✓ $*${RESET}"
 }
@@ -36,7 +45,11 @@ warn() {
     printf '%b\n' "${YELLOW}⚠ $*${RESET}"
 }
 
-fail() {
+info() {
+    printf '%b\n' "${CYAN}$*${RESET}"
+}
+
+error() {
     printf '%b\n' "${RED}✗ $*${RESET}"
 }
 
@@ -50,8 +63,8 @@ is_number() {
 
 echo
 echo "============================================================"
-echo " Debian 13 / sing-box 双栈网络调优"
-echo " 只读审计 → 确认 → 持久化修改"
+echo " Debian 13 双栈 TCP/UDP 网络调优"
+echo " 只读审计 → 配置来源 → 人工确认 → 精准持久化修改"
 echo "============================================================"
 echo
 
@@ -75,7 +88,7 @@ printf "  RAM      : %s MB\n" "$MEM_MB"
 printf "  Swap     : %s MB（不修改）\n" "$SWAP_MB"
 
 # ============================================================
-# 2. 双栈 / TCP / UDP
+# 2. IPv4 / IPv6 / TCP / UDP
 # ============================================================
 
 info "[2/8] IPv4 / IPv6 / TCP / UDP 检测"
@@ -87,7 +100,7 @@ IPV6_DISABLED=$(sysctl_get net.ipv6.conf.all.disable_ipv6)
 
 TCP_LISTEN=$(ss -Hlt 2>/dev/null | wc -l)
 TCP_ESTABLISHED=$(ss -Htan state established 2>/dev/null | wc -l)
-UDP_SOCKET=$(ss -Huan 2>/dev/null | wc -l)
+UDP_SOCKETS=$(ss -Huan 2>/dev/null | wc -l)
 
 DEFAULT_IF=$(ip route show default 2>/dev/null | awk 'NR==1 {print $5}')
 
@@ -96,7 +109,7 @@ printf "  IPv6 地址        : %s\n" "$IPV6_COUNT"
 printf "  IPv6 disabled    : %s\n" "${IPV6_DISABLED:-unknown}"
 printf "  TCP LISTEN       : %s\n" "$TCP_LISTEN"
 printf "  TCP established  : %s\n" "$TCP_ESTABLISHED"
-printf "  UDP sockets      : %s\n" "$UDP_SOCKET"
+printf "  UDP sockets      : %s\n" "$UDP_SOCKETS"
 printf "  默认网卡         : %s\n" "${DEFAULT_IF:-unknown}"
 
 # ============================================================
@@ -122,7 +135,7 @@ if [[ -n "${SSH_CONNECTION:-}" ]]; then
     printf "  本地地址    : %s\n" "$SSH_LOCAL_IP"
     printf "  本地端口    : %s\n" "$SSH_LOCAL_PORT"
 else
-    warn "当前不是 SSH 会话。"
+    warn "当前未检测到 SSH_CONNECTION。"
 fi
 
 # ============================================================
@@ -159,7 +172,7 @@ printf "  BBR 内核支持      : %s\n" "$([[ $BBR_SUPPORTED == 1 ]] && echo yes
 printf "  FQ 内核支持       : %s\n" "$([[ $FQ_SUPPORTED == 1 ]] && echo yes || echo no)"
 
 # ============================================================
-# 5. 实际网络压力
+# 5. 网络压力
 # ============================================================
 
 info "[5/8] 网络实际压力检测"
@@ -168,11 +181,8 @@ read_softnet_dropped() {
     awk '
     {
         if (NF >= 2) {
-            v = "0x" $2
-            cmd = "printf \"%d\" " v
-            cmd | getline n
-            close(cmd)
-            total += n
+            value = strtonum("0x" $2)
+            total += value
         }
     }
     END {
@@ -187,9 +197,9 @@ if [[ -n "${DEFAULT_IF:-}" &&
       -d "/sys/class/net/$DEFAULT_IF/statistics" ]]; then
 
     IFSTAT="/sys/class/net/$DEFAULT_IF/statistics"
-
     RX_DROP_1=$(cat "$IFSTAT/rx_dropped" 2>/dev/null || echo 0)
     TX_DROP_1=$(cat "$IFSTAT/tx_dropped" 2>/dev/null || echo 0)
+
 else
     RX_DROP_1=0
     TX_DROP_1=0
@@ -204,6 +214,7 @@ if [[ -n "${DEFAULT_IF:-}" &&
 
     RX_DROP_2=$(cat "$IFSTAT/rx_dropped" 2>/dev/null || echo 0)
     TX_DROP_2=$(cat "$IFSTAT/tx_dropped" 2>/dev/null || echo 0)
+
 else
     RX_DROP_2=0
     TX_DROP_2=0
@@ -238,96 +249,138 @@ printf "  tcp_max_syn_backlog  : %s\n" "${CURRENT_SYN_BACKLOG:-unknown}"
 printf "  netdev_max_backlog   : %s\n" "${CURRENT_NETDEV_BACKLOG:-unknown}"
 
 # ============================================================
-# 7. systemd-sysctl 配置文件
+# 7. 构建 systemd-sysctl 实际读取的文件列表
 # ============================================================
 
-info "[7/8] 检测 systemd-sysctl 配置来源"
+info "[7/8] 检测 systemd-sysctl 实际配置文件"
 
-declare -A CONFIG_FILES
+# systemd-sysctl 默认搜索目录：
+#
+# /etc/sysctl.d
+# /run/sysctl.d
+# /usr/local/lib/sysctl.d
+# /usr/lib/sysctl.d
+#
+# /usr/lib/sysctl.d 还可能通过 /lib/sysctl.d 对应。
+#
+# 同名文件按目录优先级覆盖：
+# /etc > /run > /usr/local/lib > /usr/lib
 
-SYSCTL_DIRS=(
-    "/etc/sysctl.d"
-    "/run/sysctl.d"
-    "/usr/local/lib/sysctl.d"
-    "/usr/lib/sysctl.d"
-)
+declare -A SYSCTL_FILES
 
-for DIR in "${SYSCTL_DIRS[@]}"; do
-    [[ -d "$DIR" ]] || continue
+add_sysctl_files() {
+    local DIR="$1"
+
+    [[ -d "$DIR" ]] || return 0
 
     while IFS= read -r FILE; do
-        NAME=$(basename "$FILE")
+        local BASE
+        BASE=$(basename "$FILE")
 
-        # 同名文件：
-        # /etc > /run > /usr/local/lib > /usr/lib
-        if [[ -z "${CONFIG_FILES[$NAME]+x}" ]]; then
-            CONFIG_FILES["$NAME"]="$FILE"
+        # 高优先级目录已经有同名文件时，不使用低优先级同名文件。
+        if [[ -z "${SYSCTL_FILES[$BASE]+x}" ]]; then
+            SYSCTL_FILES["$BASE"]="$FILE"
         fi
+
     done < <(
         find "$DIR" \
             -maxdepth 1 \
             -type f \
             -name '*.conf' \
-            -print 2>/dev/null
+            -print 2>/dev/null |
+        sort
     )
-done
+}
 
-EFFECTIVE_LIST="$TMP_DIR/effective.list"
+add_sysctl_files "/usr/lib/sysctl.d"
+add_sysctl_files "/usr/local/lib/sysctl.d"
+add_sysctl_files "/run/sysctl.d"
+add_sysctl_files "/etc/sysctl.d"
 
-for NAME in "${!CONFIG_FILES[@]}"; do
-    printf '%s\t%s\n' "$NAME" "${CONFIG_FILES[$NAME]}"
+SYSCTL_LIST="$TMP_DIR/sysctl.list"
+
+for BASE in "${!SYSCTL_FILES[@]}"; do
+    printf '%s\t%s\n' "$BASE" "${SYSCTL_FILES[$BASE]}"
 done |
-    sort -k1,1 > "$EFFECTIVE_LIST"
+sort -k1,1 > "$SYSCTL_LIST"
 
 echo
-echo "  systemd-sysctl 配置文件："
+echo "  当前 systemd-sysctl 配置文件："
 
-while IFS=$'\t' read -r NAME FILE; do
-    printf "    %-35s %s\n" "$NAME" "$FILE"
-done < "$EFFECTIVE_LIST"
+if [[ -s "$SYSCTL_LIST" ]]; then
+
+    while IFS=$'\t' read -r BASE FILE; do
+        printf "    %-35s %s\n" "$BASE" "$FILE"
+    done < "$SYSCTL_LIST"
+
+else
+
+    warn "未发现现有 sysctl.d 配置文件。"
+
+fi
 
 # ============================================================
-# 8. 精确寻找最终生效配置
+# 参数解析
 # ============================================================
 
-info "[8/8] 精确解析参数来源"
+# systemd-sysctl 对配置文件的基本处理是：
+# 文件按词法顺序处理；
+# 后出现的参数可以覆盖前面的参数。
+#
+# 这里不修改 /proc。
+# 只解析现有配置文件。
+#
+# 同时识别：
+#   key = value
+#   -key = value
+#   # key = value
+#
+# 被注释的参数只作为候选，不视为当前有效配置。
 
 declare -A ACTIVE_FILE
 declare -A ACTIVE_LINE
+declare -A ACTIVE_VALUE
+
 declare -A COMMENT_FILE
 declare -A COMMENT_LINE
+declare -A COMMENT_VALUE
 
-find_key_in_file() {
+extract_key_lines() {
     local KEY="$1"
     local FILE="$2"
 
     awk -v key="$KEY" '
     {
+        original=$0
         line=$0
-        trimmed=line
 
-        sub(/^[[:space:]]+/, "", trimmed)
+        # 删除前导空白
+        sub(/^[[:space:]]+/, "", line)
 
         commented=0
 
-        if (trimmed ~ /^#/) {
+        # 识别 # 注释
+        if (line ~ /^#/) {
             commented=1
-            sub(/^#[[:space:]]*/, "", trimmed)
-        }
-        else if (trimmed ~ /^;/) {
-            commented=1
-            sub(/^;[[:space:]]*/, "", trimmed)
+            sub(/^#[[:space:]]*/, "", line)
         }
 
-        # systemd-sysctl 支持前导 "-"
-        sub(/^-[[:space:]]*/, "", trimmed)
+        # systemd-sysctl 支持忽略失败前缀 -
+        sub(/^-/, "", line)
 
-        if (
-            trimmed ~ (
-                "^[[:space:]]*" key "[[:space:]]*="
-            )
-        ) {
-            print NR "|" commented
+        # 精确匹配 key =
+        if (line ~ ("^" key "[[:space:]]*=")) {
+
+            value=line
+
+            sub(("^" key "[[:space:]]*=[[:space:]]*"), "", value)
+
+            # 删除行尾注释
+            sub(/[[:space:]]+#.*$/, "", value)
+
+            gsub(/[[:space:]]+$/, "", value)
+
+            print NR "|" commented "|" value
         }
     }
     ' "$FILE"
@@ -342,53 +395,65 @@ TARGET_KEYS=(
     "net.ipv4.tcp_max_syn_backlog"
 )
 
-TARGET_BBR="bbr"
-TARGET_QDISC="fq"
-TARGET_TFO="3"
-TARGET_SYNCOOKIES="1"
-TARGET_SOMAX="4096"
-TARGET_SYN_BACKLOG="4096"
-
 for KEY in "${TARGET_KEYS[@]}"; do
 
     ACTIVE_FILE["$KEY"]=""
     ACTIVE_LINE["$KEY"]=""
+    ACTIVE_VALUE["$KEY"]=""
 
     COMMENT_FILE["$KEY"]=""
     COMMENT_LINE["$KEY"]=""
+    COMMENT_VALUE["$KEY"]=""
 
-    while IFS=$'\t' read -r NAME FILE; do
+done
 
-        [[ -f "$FILE" ]] || continue
+# ============================================================
+# 按文件实际加载顺序解析
+# ============================================================
 
-        while IFS='|' read -r LINE COMMENTED; do
+while IFS=$'\t' read -r BASE FILE; do
+
+    [[ -f "$FILE" ]] || continue
+
+    for KEY in "${TARGET_KEYS[@]}"; do
+
+        while IFS='|' read -r LINE COMMENTED VALUE; do
 
             [[ -n "$LINE" ]] || continue
 
             if [[ "$COMMENTED" == "0" ]]; then
 
-                # 后面的配置覆盖前面的配置
+                # 后加载的有效配置覆盖前面的配置。
                 ACTIVE_FILE["$KEY"]="$FILE"
                 ACTIVE_LINE["$KEY"]="$LINE"
+                ACTIVE_VALUE["$KEY"]="$VALUE"
 
-            elif [[ -z "${COMMENT_FILE[$KEY]}" ]]; then
+            else
 
-                COMMENT_FILE["$KEY"]="$FILE"
-                COMMENT_LINE["$KEY"]="$LINE"
+                # 仅记录一个现有注释配置作为候选。
+                if [[ -z "${COMMENT_FILE[$KEY]}" ]]; then
+                    COMMENT_FILE["$KEY"]="$FILE"
+                    COMMENT_LINE["$KEY"]="$LINE"
+                    COMMENT_VALUE["$KEY"]="$VALUE"
+                fi
 
             fi
 
         done < <(
-            find_key_in_file "$KEY" "$FILE"
+            extract_key_lines "$KEY" "$FILE"
         )
 
-    done < "$EFFECTIVE_LIST"
+    done
 
-done
+done < "$SYSCTL_LIST"
+
+# ============================================================
+# 显示真实配置来源
+# ============================================================
 
 echo
 echo "------------------------------------------------------------"
-echo " 参数最终配置来源"
+echo " 参数实际持久化配置来源"
 echo "------------------------------------------------------------"
 
 for KEY in "${TARGET_KEYS[@]}"; do
@@ -398,9 +463,12 @@ for KEY in "${TARGET_KEYS[@]}"; do
 
     if [[ -n "${ACTIVE_FILE[$KEY]}" ]]; then
 
-        printf "  生效配置 : %s:%s\n" \
+        printf "  有效配置 : %s:%s\n" \
             "${ACTIVE_FILE[$KEY]}" \
             "${ACTIVE_LINE[$KEY]}"
+
+        printf "  文件值   : %s\n" \
+            "${ACTIVE_VALUE[$KEY]}"
 
     elif [[ -n "${COMMENT_FILE[$KEY]}" ]]; then
 
@@ -408,9 +476,12 @@ for KEY in "${TARGET_KEYS[@]}"; do
             "${COMMENT_FILE[$KEY]}" \
             "${COMMENT_LINE[$KEY]}"
 
+        printf "  注释值   : %s\n" \
+            "${COMMENT_VALUE[$KEY]}"
+
     else
 
-        echo "  配置文件 : 未找到"
+        echo "  现有配置文件中不存在此参数。"
 
     fi
 
@@ -420,11 +491,6 @@ done
 # 生成修改计划
 # ============================================================
 
-echo
-echo "============================================================"
-echo "                      审计结果"
-echo "============================================================"
-
 declare -a CHANGES=()
 
 add_change() {
@@ -433,74 +499,83 @@ add_change() {
     local CURRENT="$2"
     local TARGET="$3"
 
-    local FILE="${ACTIVE_FILE[$KEY]:-}"
-    local LINE="${ACTIVE_LINE[$KEY]:-}"
-
-    local CFILE="${COMMENT_FILE[$KEY]:-}"
-    local CLINE="${COMMENT_LINE[$KEY]:-}"
-
     if [[ "$CURRENT" == "$TARGET" ]]; then
-
         ok "$KEY：当前已经是 $TARGET，不修改。"
         return
-
     fi
 
-    if [[ -n "$FILE" ]]; then
+    # 只有存在现有有效配置才能修改。
+    if [[ -n "${ACTIVE_FILE[$KEY]}" ]]; then
 
         CHANGES+=(
-            "$KEY|$CURRENT|$TARGET|$FILE|$LINE|active"
+            "$KEY|$CURRENT|$TARGET|${ACTIVE_FILE[$KEY]}|${ACTIVE_LINE[$KEY]}|active"
         )
 
         warn "$KEY：$CURRENT → $TARGET"
-        echo "    精准修改：$FILE:$LINE"
+        echo "    精准修改：${ACTIVE_FILE[$KEY]}:${ACTIVE_LINE[$KEY]}"
 
-    elif [[ -n "$CFILE" ]]; then
-
-        CHANGES+=(
-            "$KEY|$CURRENT|$TARGET|$CFILE|$CLINE|commented"
-        )
-
-        warn "$KEY：$CURRENT → $TARGET"
-        echo "    解除注释并修改：$CFILE:$CLINE"
-
-    else
-
-        CHANGES+=(
-            "$KEY|$CURRENT|$TARGET|/etc/sysctl.d/90-singbox.conf|0|new"
-        )
-
-        warn "$KEY：$CURRENT → $TARGET"
-        echo "    新增：/etc/sysctl.d/90-singbox.conf"
-
+        return
     fi
+
+    # 有注释配置：
+    # 解除注释并修改。
+    if [[ -n "${COMMENT_FILE[$KEY]}" ]]; then
+
+        CHANGES+=(
+            "$KEY|$CURRENT|$TARGET|${COMMENT_FILE[$KEY]}|${COMMENT_LINE[$KEY]}|commented"
+        )
+
+        warn "$KEY：$CURRENT → $TARGET"
+        echo "    解除注释并修改：${COMMENT_FILE[$KEY]}:${COMMENT_LINE[$KEY]}"
+
+        return
+    fi
+
+    # 完全没有配置：
+    # 严格按照用户要求：不创建文件、不新增参数。
+    warn "$KEY：$CURRENT → $TARGET"
+    echo "    未找到现有持久化配置 → 不修改"
+
 }
+
+echo
+echo "============================================================"
+echo "                      审计结果"
+echo "============================================================"
 
 echo
 echo "[BBR / FQ / TFO]"
 
 if [[ "$BBR_SUPPORTED" == 1 ]]; then
+
     add_change \
         "net.ipv4.tcp_congestion_control" \
         "$CURRENT_CC" \
-        "$TARGET_BBR"
+        "bbr"
+
 else
+
     warn "内核不支持 BBR，不修改。"
+
 fi
 
 if [[ "$FQ_SUPPORTED" == 1 ]]; then
+
     add_change \
         "net.core.default_qdisc" \
         "$CURRENT_QDISC" \
-        "$TARGET_QDISC"
+        "fq"
+
 else
+
     warn "内核不支持 sch_fq，不修改。"
+
 fi
 
 add_change \
     "net.ipv4.tcp_fastopen" \
     "$CURRENT_TFO" \
-    "$TARGET_TFO"
+    "3"
 
 echo
 echo "[TCP 连接参数]"
@@ -508,61 +583,66 @@ echo "[TCP 连接参数]"
 add_change \
     "net.ipv4.tcp_syncookies" \
     "$CURRENT_SYNCOOKIES" \
-    "$TARGET_SYNCOOKIES"
+    "1"
 
-if is_number "$CURRENT_SOMAX" &&
-   (( CURRENT_SOMAX < 4096 )); then
+if is_number "$CURRENT_SOMAX"; then
 
-    add_change \
-        "net.core.somaxconn" \
-        "$CURRENT_SOMAX" \
-        "$TARGET_SOMAX"
+    if (( CURRENT_SOMAX < 4096 )); then
+
+        add_change \
+            "net.core.somaxconn" \
+            "$CURRENT_SOMAX" \
+            "4096"
+
+    else
+
+        ok "net.core.somaxconn：$CURRENT_SOMAX，不修改。"
+
+    fi
 
 else
 
-    ok "net.core.somaxconn：$CURRENT_SOMAX，不修改。"
+    warn "无法读取 net.core.somaxconn，不修改。"
 
 fi
 
-if is_number "$CURRENT_SYN_BACKLOG" &&
-   (( CURRENT_SYN_BACKLOG < 4096 )); then
+if is_number "$CURRENT_SYN_BACKLOG"; then
 
-    add_change \
-        "net.ipv4.tcp_max_syn_backlog" \
-        "$CURRENT_SYN_BACKLOG" \
-        "$TARGET_SYN_BACKLOG"
+    if (( CURRENT_SYN_BACKLOG < 4096 )); then
+
+        add_change \
+            "net.ipv4.tcp_max_syn_backlog" \
+            "$CURRENT_SYN_BACKLOG" \
+            "4096"
+
+    else
+
+        ok "net.ipv4.tcp_max_syn_backlog：$CURRENT_SYN_BACKLOG，不修改。"
+
+    fi
 
 else
 
-    ok "net.ipv4.tcp_max_syn_backlog：$CURRENT_SYN_BACKLOG，不修改。"
+    warn "无法读取 net.ipv4.tcp_max_syn_backlog，不修改。"
 
 fi
 
 echo
 echo "[网络队列]"
 
-if is_number "$CURRENT_NETDEV_BACKLOG"; then
+if (( SOFTNET_DELTA > 0 )); then
 
-    if (( SOFTNET_DELTA > 0 )); then
-
-        warn "检测到 softnet drops：$SOFTNET_DELTA / 3s"
-        echo "    当前 netdev_max_backlog：$CURRENT_NETDEV_BACKLOG"
-        echo "    本脚本不会根据一次短采样自动修改。"
-
-    else
-
-        ok "没有检测到 softnet drops，不修改 netdev_max_backlog。"
-
-    fi
+    warn "检测到 softnet drops：$SOFTNET_DELTA / 3s"
+    echo "    不根据单次短采样自动修改 netdev_max_backlog。"
 
 else
 
-    warn "无法读取 net.core.netdev_max_backlog。"
+    ok "没有检测到 softnet drops，不修改 net.core.netdev_max_backlog。"
 
 fi
 
 # ============================================================
-# 明确不会修改
+# 明确不修改
 # ============================================================
 
 echo
@@ -585,17 +665,21 @@ echo "  netdev_budget"
 echo "  netdev_budget_usecs"
 echo "  SSH 服务"
 echo "  网络服务"
-echo "  systemd-sysctl 重载"
-echo "  VPS 重启"
+echo "  当前运行中的 sysctl"
+echo "  当前运行中的 qdisc"
+echo "  当前运行中的拥塞控制"
+echo
+echo "  不创建新的 sysctl 配置文件"
+echo "  不创建新的网络调优文件"
 
 # ============================================================
-# 无修改
+# 没有修改
 # ============================================================
 
 if (( ${#CHANGES[@]} == 0 )); then
 
     echo
-    ok "审计完成：没有需要修改的核心参数。"
+    ok "审计完成：没有可修改项目。"
     echo
     echo "系统没有发生任何修改。"
     exit 0
@@ -603,7 +687,7 @@ if (( ${#CHANGES[@]} == 0 )); then
 fi
 
 # ============================================================
-# 修改确认
+# 最终确认
 # ============================================================
 
 echo
@@ -613,8 +697,7 @@ echo "============================================================"
 
 for ITEM in "${CHANGES[@]}"; do
 
-    IFS='|' read -r \
-        KEY CURRENT TARGET FILE LINE TYPE <<< "$ITEM"
+    IFS='|' read -r KEY CURRENT TARGET FILE LINE TYPE <<< "$ITEM"
 
     printf "  %-38s %s → %s\n" \
         "$KEY" \
@@ -624,15 +707,11 @@ for ITEM in "${CHANGES[@]}"; do
     case "$TYPE" in
 
         active)
-            echo "    修改：$FILE:$LINE"
+            echo "    精准修改：$FILE:$LINE"
             ;;
 
         commented)
-            echo "    解除注释并修改：$FILE:$LINE"
-            ;;
-
-        new)
-            echo "    新增：$FILE"
+            echo "    解除注释并精准修改：$FILE:$LINE"
             ;;
 
     esac
@@ -641,17 +720,24 @@ done
 
 echo
 echo "============================================================"
-echo "重要：确认后只修改持久化配置。"
-echo
-echo "本脚本不会执行："
-echo "  sysctl -w"
-echo "  modprobe"
-echo "  systemctl restart systemd-sysctl"
-echo "  systemctl restart networking"
-echo "  systemctl restart NetworkManager"
-echo "  systemctl restart ssh"
-echo "  reboot"
+echo "                         安全模式"
 echo "============================================================"
+echo
+echo "确认后："
+echo "  ✓ 只修改现有配置文件"
+echo "  ✓ 只修改目标参数所在行"
+echo "  ✓ 注释参数只解除对应注释"
+echo "  ✓ 不创建新的 sysctl 配置文件"
+echo "  ✓ 不执行 sysctl -w"
+echo "  ✓ 不执行 modprobe"
+echo "  ✓ 不 reload systemd-sysctl"
+echo "  ✓ 不重启网络"
+echo "  ✓ 不重启 SSH"
+echo "  ✓ 不重启 VPS"
+echo
+echo "因此当前 SSH 会话不会被脚本主动切换网络参数。"
+echo
+echo "修改后的配置将在系统下次启动时由 systemd-sysctl 应用。"
 echo
 
 read -r -p "确认执行以上修改？[y/N] " CONFIRM
@@ -665,174 +751,108 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
 fi
 
 # ============================================================
-# 精准写入函数
+# 精准修改函数
 # ============================================================
 
 write_precise() {
 
     local KEY="$1"
     local VALUE="$2"
+    local FILE="$3"
+    local LINE="$4"
+    local TYPE="$5"
 
-    local FILE="${ACTIVE_FILE[$KEY]:-}"
-    local LINE="${ACTIVE_LINE[$KEY]:-}"
+    [[ -f "$FILE" ]] || {
+        error "文件不存在，跳过：$FILE"
+        return 1
+    }
 
-    local CFILE="${COMMENT_FILE[$KEY]:-}"
-    local CLINE="${COMMENT_LINE[$KEY]:-}"
+    local BEFORE
+    BEFORE=$(sed -n "${LINE}p" "$FILE")
 
-    # --------------------------------------------------------
-    # 已存在有效配置
-    # --------------------------------------------------------
+    [[ -n "$BEFORE" ]] || {
+        error "目标行不存在，跳过：$FILE:$LINE"
+        return 1
+    }
 
-    if [[ -n "$FILE" && -n "$LINE" ]]; then
+    # 使用 awk 按行号修改。
+    # 只修改指定行，不对其他内容进行全局替换。
 
-        awk \
-            -v target="$LINE" \
-            -v key="$KEY" \
-            -v value="$VALUE" '
+    awk \
+        -v target_line="$LINE" \
+        -v key="$KEY" \
+        -v value="$VALUE" '
 
-        NR == target {
+    NR == target_line {
 
-            indent=$0
-            sub(/[^[:space:]].*$/, "", indent)
+        indent=$0
+        sub(/[^[:space:]].*$/, "", indent)
 
-            print indent key " = " value
-            next
-        }
+        print indent key " = " value
+        next
+    }
 
-        {
-            print
-        }
+    {
+        print
+    }
 
-        ' "$FILE" > "$TMP_DIR/modified"
+    ' "$FILE" > "$TMP_DIR/modified"
 
-        cat "$TMP_DIR/modified" > "$FILE"
+    # 再次确认目标行确实包含目标 key。
+    AFTER=$(sed -n "${LINE}p" "$TMP_DIR/modified")
 
-        ok "$KEY → $VALUE"
-        echo "    已精准修改：$FILE:$LINE"
-
-        return
-    fi
-
-    # --------------------------------------------------------
-    # 已存在注释配置
-    # --------------------------------------------------------
-
-    if [[ -n "$CFILE" && -n "$CLINE" ]]; then
-
-        awk \
-            -v target="$CLINE" \
-            -v key="$KEY" \
-            -v value="$VALUE" '
-
-        NR == target {
-
-            indent=$0
-            sub(/[^[:space:]].*$/, "", indent)
-
-            print indent key " = " value
-            next
-        }
-
-        {
-            print
-        }
-
-        ' "$CFILE" > "$TMP_DIR/modified"
-
-        cat "$TMP_DIR/modified" > "$CFILE"
-
-        ACTIVE_FILE["$KEY"]="$CFILE"
-        ACTIVE_LINE["$KEY"]="$CLINE"
-
-        ok "$KEY → $VALUE"
-        echo "    已解除注释并精准修改：$CFILE:$CLINE"
-
-        return
-    fi
-
-    # --------------------------------------------------------
-    # 完全不存在
-    # --------------------------------------------------------
-
-    FILE="/etc/sysctl.d/90-singbox.conf"
-
-    touch "$FILE"
-
-    if grep -qE \
+    if ! grep -qE \
         "^[[:space:]]*${KEY//./\\.}[[:space:]]*=" \
-        "$FILE"; then
+        <<< "$AFTER"; then
 
-        sed -i -E \
-            "s|^[[:space:]]*${KEY//./\\.}[[:space:]]*=.*$|${KEY} = ${VALUE}|" \
-            "$FILE"
-
-    else
-
-        printf '%s = %s\n' \
-            "$KEY" \
-            "$VALUE" >> "$FILE"
+        error "安全检查失败，拒绝修改：$FILE:$LINE"
+        return 1
 
     fi
+
+    # 原子替换：
+    # 先生成临时文件，再覆盖原文件。
+    cat "$TMP_DIR/modified" > "$FILE"
 
     ok "$KEY → $VALUE"
-    echo "    已写入：$FILE"
+    echo "    文件：$FILE"
+    echo "    行号：$LINE"
+    echo "    原值：$BEFORE"
+    echo "    新值：$AFTER"
+
+    return 0
 }
 
 # ============================================================
-# 开始持久化修改
+# 执行精准修改
 # ============================================================
 
 echo
 echo "============================================================"
-echo "                       开始修改"
+echo "                       开始精准修改"
 echo "============================================================"
+
+MODIFY_FAILED=0
 
 for ITEM in "${CHANGES[@]}"; do
 
-    IFS='|' read -r \
-        KEY CURRENT TARGET FILE LINE TYPE <<< "$ITEM"
+    IFS='|' read -r KEY CURRENT TARGET FILE LINE TYPE <<< "$ITEM"
 
-    case "$KEY" in
+    if ! write_precise \
+        "$KEY" \
+        "$TARGET" \
+        "$FILE" \
+        "$LINE" \
+        "$TYPE"; then
 
-        net.ipv4.tcp_congestion_control)
+        MODIFY_FAILED=1
 
-            [[ "$BBR_SUPPORTED" == 1 ]] || continue
-            ;;
-
-        net.core.default_qdisc)
-
-            [[ "$FQ_SUPPORTED" == 1 ]] || continue
-            ;;
-
-    esac
-
-    write_precise "$KEY" "$TARGET"
+    fi
 
 done
 
 # ============================================================
-# 模块持久化
-# ============================================================
-
-MODULE_FILE="/etc/modules-load.d/singbox-network.conf"
-
-{
-    echo "# sing-box network modules"
-
-    if [[ "$BBR_SUPPORTED" == 1 ]]; then
-        echo "tcp_bbr"
-    fi
-
-    if [[ "$FQ_SUPPORTED" == 1 ]]; then
-        echo "sch_fq"
-    fi
-
-} > "$MODULE_FILE"
-
-ok "内核模块持久化配置：$MODULE_FILE"
-
-# ============================================================
-# 验证持久化文件
+# 最终文件验证
 # ============================================================
 
 echo
@@ -840,67 +860,79 @@ echo "============================================================"
 echo "                     持久化配置验证"
 echo "============================================================"
 
-VERIFY_FILE="/etc/sysctl.d/90-singbox.conf"
+for ITEM in "${CHANGES[@]}"; do
 
-if [[ -f "$VERIFY_FILE" ]]; then
+    IFS='|' read -r KEY CURRENT TARGET FILE LINE TYPE <<< "$ITEM"
 
-    echo
-    echo "[$VERIFY_FILE]"
+    if [[ -f "$FILE" ]]; then
 
-    grep -E \
-        '^(net\.ipv4\.tcp_congestion_control|net\.core\.default_qdisc|net\.ipv4\.tcp_fastopen|net\.ipv4\.tcp_syncookies|net\.core\.somaxconn|net\.ipv4\.tcp_max_syn_backlog)[[:space:]]*=' \
-        "$VERIFY_FILE" 2>/dev/null || true
+        VALUE=$(sed -n "${LINE}p" "$FILE" 2>/dev/null || true)
 
-fi
+        if grep -qE \
+            "^[[:space:]]*${KEY//./\\.}[[:space:]]*=[[:space:]]*${TARGET//./\\.}([[:space:]]|$)" \
+            <<< "$VALUE"; then
 
-echo
-echo "[$MODULE_FILE]"
+            ok "$KEY：持久化配置确认 → $TARGET"
 
-cat "$MODULE_FILE"
+        else
 
-# ============================================================
-# 当前运行状态
-# ============================================================
+            warn "$KEY：请人工检查 $FILE:$LINE"
+
+        fi
+
+    fi
+
+done
 
 echo
 echo "============================================================"
 echo "                     当前运行状态"
 echo "============================================================"
 
-echo "注意：本脚本没有即时 reload sysctl。"
-echo "因此下面显示的是当前内核运行值，而不是重启后的最终值。"
+echo "注意：本脚本没有重新加载 sysctl。"
+echo "下面显示的是当前正在运行的内核值。"
 echo
 
-printf "  当前 BBR              : %s\n" \
+printf "  当前 BBR          : %s\n" \
     "$(sysctl_get net.ipv4.tcp_congestion_control)"
 
-printf "  当前 qdisc             : %s\n" \
+printf "  当前 qdisc         : %s\n" \
     "$(sysctl_get net.core.default_qdisc)"
 
-printf "  当前 TCP Fast Open     : %s\n" \
+printf "  当前 TCP Fast Open : %s\n" \
     "$(sysctl_get net.ipv4.tcp_fastopen)"
 
-printf "  当前 SYN cookies       : %s\n" \
+printf "  当前 SYN cookies   : %s\n" \
     "$(sysctl_get net.ipv4.tcp_syncookies)"
 
-printf "  当前 somaxconn         : %s\n" \
+printf "  当前 somaxconn     : %s\n" \
     "$(sysctl_get net.core.somaxconn)"
 
-printf "  当前 tcp_max_syn_backlog : %s\n" \
+printf "  当前 syn backlog   : %s\n" \
     "$(sysctl_get net.ipv4.tcp_max_syn_backlog)"
 
 echo
 echo "============================================================"
-echo "                       修改完成"
-echo "============================================================"
 
-if [[ "$SSH_ACTIVE" == 1 ]]; then
-    ok "当前 SSH 会话未被脚本主动重启或切断。"
+if (( MODIFY_FAILED == 0 )); then
+
+    ok "持久化配置修改完成。"
+
+else
+
+    error "部分项目修改失败，请根据上面的错误检查。"
+
 fi
 
 echo
-echo "新的 sysctl 配置将在下次系统正常启动时由 systemd-sysctl 应用。"
-echo "BBR/FQ 模块将在下次启动时由 modules-load.d 加载。"
+echo "重要："
+echo "  当前 SSH / 网络没有被脚本重启。"
+echo "  当前运行中的 qdisc / BBR / sysctl 没有被强制切换。"
+echo "  新配置将在下一次系统启动时由 systemd-sysctl 应用。"
 echo
-echo "当前会话无需重启。"
+
+if [[ "$SSH_ACTIVE" == 1 ]]; then
+    ok "当前 SSH 会话未被脚本主动重启。"
+fi
+
 echo
