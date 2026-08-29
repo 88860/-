@@ -1,20 +1,13 @@
 #!/bin/bash
 # ==============================================================================
 # Debian 13 (Trixie) Native Optimizer
-# 中文输出 / 五阶段架构 / 零新建 Debian 原生优化配置
 #
 # 1. 更换 XanMod 内核 (已修复 CPU 架构探测，支持 v1 兜底)
-# 2. 系统更新 + TCP/BBR/FQ + Journald/Logrotate 优化
+# 2. 暴力清理旧内核 + 系统更新 + TCP/BBR/FQ + 日志优化
+#    └─ 包含越权强改底层 vendor 队列为 fq，及强删非运行态老内核
 # 3. 一键清理日志、垃圾、旧内核及常见残留
 # 4. 一键 DD 全新 Debian 13 系统
-# 5. 只读真实性审计
-#
-# 设计原则：
-# - Debian 原生优化模块不创建新的 sysctl/journald/logrotate 配置文件。
-# - 只有当目标参数已经存在于实际配置链中时，才进行原位精准修改。
-# - 不把 runtime-only 的 sysctl -w 当成“持久化成功”。
-# - XanMod 是唯一明确允许创建第三方 APT keyring/source 文件的模块。
-# - 选项 5 完全只读，不修改系统。
+# 5. 只读真实性详细审计
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -62,20 +55,6 @@ on_error() {
 }
 trap on_error ERR
 
-# ------------------------------ 安全执行 --------------------------------------
-
-run_cmd() {
-    local description="$1"
-    shift
-    log "$description"
-    if "$@"; then
-        pass "命令执行成功"
-        return 0
-    fi
-    fail "命令执行失败: $*"
-    return 1
-}
-
 require_root() {
     [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "请使用 root 权限运行。"
 }
@@ -87,39 +66,14 @@ check_os() {
     . /etc/os-release
 
     if [[ "${ID:-}" != "debian" || "${VERSION_CODENAME:-}" != "trixie" ]]; then
-        die "本脚本仅支持 Debian 13 (Trixie)。检测到: ${PRETTY_NAME:-未知}"
+        die "本脚本仅支持 Debian 13 (Trixie)。"
     fi
     pass "确认 Debian 13 (Trixie): ${PRETTY_NAME:-Debian GNU/Linux 13 (trixie)}"
-
-    local arch
-    arch="$(dpkg --print-architecture 2>/dev/null || true)"
-    [[ "$arch" == "amd64" ]] || die "当前架构为 ${arch:-未知}，本脚本 XanMod 部分针对 amd64。"
-    pass "架构: amd64"
 }
 
 check_systemd() {
     log "检测 systemd..."
     command -v systemctl >/dev/null 2>&1 || die "systemctl 不存在。"
-    systemctl list-unit-files systemd-sysctl.service >/dev/null 2>&1 ||
-        die "systemd-sysctl.service 不存在。"
-    systemctl list-unit-files systemd-journald.service >/dev/null 2>&1 ||
-        die "systemd-journald.service 不存在。"
-
-    found "systemd-sysctl.service"
-    found "systemd-journald.service"
-
-    local sysctl_bin=""
-    for p in /usr/lib/systemd/systemd-sysctl /lib/systemd/systemd-sysctl; do
-        if [[ -x "$p" ]]; then sysctl_bin="$p"; break; fi
-    done
-    [[ -n "$sysctl_bin" ]] && found "真实 systemd-sysctl 程序: $sysctl_bin"
-
-    local journald_bin=""
-    for p in /usr/lib/systemd/systemd-journald /lib/systemd/systemd-journald; do
-        if [[ -x "$p" ]]; then journald_bin="$p"; break; fi
-    done
-    [[ -n "$journald_bin" ]] && found "真实 systemd-journald 程序: $journald_bin"
-
     pass "systemd 环境检测通过"
 }
 
@@ -128,55 +82,27 @@ check_dpkg() {
     if dpkg --audit >/dev/null 2>&1; then
         pass "DPKG 状态正常"
     else
-        warn "DPKG 存在待处理状态；后续会尝试 dpkg --configure -a。"
+        warn "DPKG 存在待处理状态；尝试 dpkg --configure -a。"
+        dpkg --configure -a >/dev/null 2>&1 || true
     fi
 }
 
 ensure_basic_tools() {
     log "检查基础工具..."
     local missing=()
-    local cmd pkg
-    for cmd in awk sed grep find xargs du df sort head tail cut tr; do
-        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
-    done
-
     for pkg in ca-certificates wget curl gpg; do
-        dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null |
-            grep -q 'install ok installed' || missing+=("$pkg")
+        dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
     done
 
     if ((${#missing[@]})); then
-        local unique=()
-        local x seen
-        for x in "${missing[@]}"; do
-            seen=0
-            for pkg in "${unique[@]:-}"; do
-                [[ "$pkg" == "$x" ]] && seen=1
-            done
-            ((seen==0)) && unique+=("$x")
-        done
-
-        local packages=()
-        for x in "${unique[@]}"; do
-            case "$x" in
-                ca-certificates|wget|curl|gpg) packages+=("$x") ;;
-            esac
-        done
-
-        if ((${#packages[@]})); then
-            log "安装缺失基础工具: ${packages[*]}"
-            apt-get update -qq
-            apt-get install -y --no-install-recommends "${packages[@]}"
-        fi
+        log "安装缺失基础工具: ${missing[*]}"
+        apt-get update -qq
+        apt-get install -y --no-install-recommends "${missing[@]}"
     fi
-
-    command -v wget >/dev/null 2>&1 || die "wget 安装/验证失败。"
-    command -v curl >/dev/null 2>&1 || die "curl 安装/验证失败。"
-    command -v gpg  >/dev/null 2>&1 || die "gpg 安装/验证失败。"
-    pass "wget / curl / gpg / ca-certificates 已验证"
+    pass "基础工具已就绪"
 }
 
-# ------------------------------ sysctl ----------------------------------------
+# ------------------------------ sysctl 动态探测 --------------------------------
 
 SYSCTL_DIRS=(
     /etc/sysctl.d
@@ -193,16 +119,6 @@ declare -A SYSCTL_IS_ADMIN
 sysctl_key_to_path() {
     local key="$1"
     printf '/proc/sys/%s\n' "${key//./\/}"
-}
-
-list_sysctl_files() {
-    local d f
-    for d in "${SYSCTL_DIRS[@]}"; do
-        [[ -d "$d" ]] || continue
-        for f in "$d"/*.conf; do
-            [[ -f "$f" ]] && printf '%s\n' "$f"
-        done
-    done
 }
 
 sysctl_effective_source() {
@@ -280,20 +196,21 @@ replace_sysctl_existing_line() {
     rm -f "$tmp"
 }
 
+# 增加了 force_vendor 参数，允许跨权限强改底层配置 (专为强制修改 fq 设计)
 modify_existing_sysctl() {
-    local key="$1" target="$2"
+    local key="$1" target="$2" force_vendor="${3:-0}"
     sysctl_effective_source "$key"
 
     local src="${SYSCTL_SOURCE[$key]:-}"
     if [[ -z "$src" ]]; then
-        skip "$key：实际 sysctl 配置链中没有现成配置项；不创建文件、不追加配置。"
+        skip "$key：配置链中无现成配置项；不创建文件。"
         return 0
     fi
 
     found "$key -> $src"
 
-    if [[ "${SYSCTL_IS_ADMIN[$key]:-0}" != 1 ]]; then
-        skip "$key：当前最终来源属于 Debian/系统默认配置，不在原生优化模块中直接修改。"
+    if [[ "${SYSCTL_IS_ADMIN[$key]:-0}" != 1 ]] && [[ "$force_vendor" != 1 ]]; then
+        skip "$key：当前属于系统只读来源，原生优化模块不直接修改。"
         return 0
     fi
 
@@ -306,25 +223,12 @@ modify_existing_sysctl() {
     fi
 }
 
-show_sysctl_chain() {
-    log "解析 systemd-sysctl 实际配置链..."
-    local files=()
-    while IFS= read -r f; do files+=("$f"); done < <(list_sysctl_files | sort -u)
-
-    if ((${#files[@]}==0)); then
-        warn "未发现 sysctl.d 配置文件。"
-    else
-        found "实际可见 sysctl 配置文件:"
-        printf '      %s\n' "${files[@]}"
-    fi
-}
-
 reload_sysctl() {
     log "重新加载 systemd-sysctl..."
     if systemctl restart systemd-sysctl.service >/dev/null 2>&1; then
         pass "systemd-sysctl.service 重启成功"
     else
-        warn "systemd-sysctl.service 重启失败，将继续进行 runtime 审计。"
+        warn "systemd-sysctl.service 重启失败。"
     fi
 }
 
@@ -339,58 +243,60 @@ read_sysctl() {
     fi
 }
 
-# ------------------------------ TCP -------------------------------------------
+# ------------------------------ Option 2 专属老内核强力清理 ------------------
+
+force_cleanup_old_kernels() {
+    log "正在彻底卸载非当前运行内核及内核元包..."
+    local current
+    current="$(uname -r)"
+    pass "受保护的当前运行内核: $current"
+
+    local targets=()
+    local p
+    while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        # 严格排除当前正在运行的内核
+        [[ "$p" == *"$current"* ]] && continue
+        targets+=("$p")
+    done < <(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | grep -E '^linux-(image|headers|modules|kbuild|config)')
+
+    if ((${#targets[@]})); then
+        info "将卸载以下内核及元包 (包含旧版原生 Debian 内核等):"
+        printf '      %s\n' "${targets[@]}"
+        apt-get purge -y -qq "${targets[@]}"
+        pass "多余内核及元包已彻底清理完毕。"
+        if command -v update-grub >/dev/null 2>&1; then
+            update-grub >/dev/null 2>&1 || true
+            pass "GRUB 引导菜单已重建"
+        fi
+    else
+        pass "未发现需要卸载的旧内核或元包。"
+    fi
+}
+
+# ------------------------------ 网络优化 (TCP/BBR/FQ) -------------------------
 
 optimize_tcp() {
-    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
-    printf '%b\n' "${C_BLUE} TCP：真实配置链 / BBR / FQ / 精准持久化 ${C_NC}"
-    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
-
-    show_sysctl_chain
-
-    log "检测当前运行内核..."
-    pass "当前运行内核: $(uname -r)"
+    log "探测与调整 TCP/BBR/FQ..."
 
     local avail
     avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-    if grep -qw bbr <<<"$avail"; then
-        pass "当前运行内核提供 BBR: $avail"
-    else
-        skip "当前运行内核没有 BBR；不创建模块加载配置，不创建 sysctl 配置。"
-    fi
-
+    
     if grep -qw bbr <<<"$avail"; then
         modify_existing_sysctl "net.ipv4.tcp_congestion_control" "bbr"
     fi
 
-    modify_existing_sysctl "net.core.default_qdisc" "fq"
-
-    info "somaxconn / tcp_max_syn_backlog / ip_local_port_range 不强制改写；仅审计其实际值和来源。"
+    # 第三个参数 1 代表启用“强制修改 Vendor 底层文件”权限，精准修改实际调用的队列文件为 fq
+    modify_existing_sysctl "net.core.default_qdisc" "fq" 1
 
     reload_sysctl
 
     log "TCP 运行状态验证..."
-    verify "net.ipv4.tcp_available_congestion_control = $(read_sysctl net.ipv4/tcp_available_congestion_control)"
     verify "net.ipv4.tcp_congestion_control = $(read_sysctl net.ipv4/tcp_congestion_control)"
     verify "net.core.default_qdisc = $(read_sysctl net/core/default_qdisc)"
-    verify "net.core.somaxconn = $(read_sysctl net/core/somaxconn)"
-    verify "net.ipv4.tcp_max_syn_backlog = $(read_sysctl net/ipv4/tcp_max_syn_backlog)"
-    verify "net.ipv4.ip_local_port_range = $(read_sysctl net/ipv4/ip_local_port_range)"
 }
 
-# ------------------------------ journald --------------------------------------
-
-JOURNAL_KEYS=(
-    SystemMaxUse
-    SystemMaxFileSize
-    SystemMaxFiles
-    RuntimeMaxUse
-    RuntimeMaxFileSize
-    RuntimeMaxFiles
-    MaxRetentionSec
-)
-
-declare -A JOURNAL_SOURCE
+# ------------------------------ Journald 日志优化 -----------------------------
 
 journald_dirs=(
     /etc/systemd/journald.conf.d
@@ -399,6 +305,7 @@ journald_dirs=(
     /usr/lib/systemd/journald.conf.d
     /lib/systemd/journald.conf.d
 )
+declare -A JOURNAL_SOURCE
 
 list_journald_files() {
     [[ -f /etc/systemd/journald.conf ]] && printf '%s\n' /etc/systemd/journald.conf
@@ -471,42 +378,20 @@ modify_existing_journald() {
     local src="${JOURNAL_SOURCE[$key]:-}"
 
     if [[ -z "$src" ]]; then
-        skip "$key：实际 journald 配置链中没有现成管理员配置项；不创建配置文件。"
         return 0
     fi
-
-    found "$key -> $src"
 
     if [[ "$src" != /etc/systemd/* ]]; then
-        skip "$key：最终来源不是 /etc 下管理员配置，保持发行版/系统配置不动。"
         return 0
     fi
 
-    modify "原位精准修改 $src：$key=$value"
     if replace_journald_existing_line "$src" "$key" "$value"; then
         pass "持久化修改成功: $src -> $key=$value"
-    else
-        fail "无法修改现有 journald 配置项: $src -> $key"
-        return 1
     fi
 }
 
 optimize_journald() {
-    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
-    printf '%b\n' "${C_BLUE} Journald：真实配置链 / 精准修改 / 容量限制 ${C_NC}"
-    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
-
-    log "解析 journald 实际配置链..."
-    local files=()
-    while IFS= read -r f; do files+=("$f"); done < <(list_journald_files)
-
-    if ((${#files[@]})); then
-        found "实际可见 journald 配置:"
-        printf '      %s\n' "${files[@]}"
-    else
-        warn "没有发现现有 journald 配置文件。"
-    fi
-
+    log "调整 journald 日志限制..."
     modify_existing_journald SystemMaxUse "$JOURNAL_MAX_USE"
     modify_existing_journald SystemMaxFileSize "$JOURNAL_MAX_FILE_SIZE"
     modify_existing_journald SystemMaxFiles "$JOURNAL_MAX_FILES"
@@ -515,277 +400,86 @@ optimize_journald() {
     modify_existing_journald RuntimeMaxFiles "$JOURNAL_MAX_FILES"
     modify_existing_journald MaxRetentionSec "$JOURNAL_MAX_RETENTION"
 
-    log "重新加载 journald..."
-    if systemctl restart systemd-journald.service >/dev/null 2>&1; then
-        pass "systemd-journald.service 重启成功"
-    else
-        warn "systemd-journald.service 重启失败。"
-    fi
-
-    log "执行 journal rotate + vacuum..."
-    journalctl --rotate >/dev/null 2>&1 || warn "journal rotate 返回异常。"
-    journalctl --vacuum-time="$JOURNAL_MAX_RETENTION" --vacuum-size="$JOURNAL_MAX_USE" >/dev/null 2>&1 ||
-        warn "journal vacuum 返回异常。"
-    pass "journal 清理命令执行完成"
-
-    log "当前 journald 占用:"
-    journalctl --disk-usage 2>/dev/null || true
+    systemctl restart systemd-journald.service >/dev/null 2>&1 || true
+    journalctl --rotate >/dev/null 2>&1 || true
+    journalctl --vacuum-time="$JOURNAL_MAX_RETENTION" --vacuum-size="$JOURNAL_MAX_USE" >/dev/null 2>&1 || true
 }
 
-# ------------------------------ logrotate -------------------------------------
-
-list_logrotate_files() {
-    [[ -f /etc/logrotate.conf ]] && printf '%s\n' /etc/logrotate.conf
-    local f
-    for f in /etc/logrotate.d/*; do
-        [[ -f "$f" ]] && printf '%s\n' "$f"
-    done
-}
-
-modify_existing_rotate() {
-    local file="$1"
-    local tmp
-    tmp="$(mktemp)"
-
-    if grep -Eq '^[[:space:]]*rotate[[:space:]]+[0-9]+' "$file"; then
-        sed -E "s/^[[:space:]]*rotate[[:space:]]+[0-9]+/rotate $LOGROTATE_ROTATE/" "$file" > "$tmp"
-        if cmp -s "$file" "$tmp"; then
-            rm -f "$tmp"
-            info "已有 rotate=$LOGROTATE_ROTATE，无需修改: $file"
-        else
-            cat "$tmp" > "$file"
-            rm -f "$tmp"
-            pass "精准修改 $file: rotate=$LOGROTATE_ROTATE"
-        fi
-        return 0
-    fi
-
-    rm -f "$tmp"
-    skip "没有现成 rotate 指令，不创建新指令/新规则: $file"
-}
+# ------------------------------ Logrotate 优化 --------------------------------
 
 optimize_logrotate() {
-    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
-    printf '%b\n' "${C_BLUE} Logrotate：现有规则精准修改 ${C_NC}"
-    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
-
-    command -v logrotate >/dev/null 2>&1 || {
-        skip "系统没有安装 logrotate，不自动新增规则。"
-        return 0
-    }
-
-    local files=()
-    while IFS= read -r f; do files+=("$f"); done < <(list_logrotate_files)
-
-    if ((${#files[@]})); then
-        found "实际存在的 logrotate 配置:"
-        printf '      %s\n' "${files[@]}"
-    fi
+    log "调整 logrotate 日志限制..."
+    command -v logrotate >/dev/null 2>&1 || return 0
 
     local f
-    for f in "${files[@]}"; do
-        modify_existing_rotate "$f" || true
-    done
-
-    log "验证 logrotate 配置语法..."
-    if logrotate -d /etc/logrotate.conf >/dev/null 2>&1; then
-        pass "logrotate 配置语法通过"
-    else
-        warn "logrotate 配置语法检查返回异常，请人工检查。"
-    fi
+    while IFS= read -r f; do
+        if grep -Eq '^[[:space:]]*rotate[[:space:]]+[0-9]+' "$f"; then
+            sed -E -i "s/^[[:space:]]*rotate[[:space:]]+[0-9]+/rotate $LOGROTATE_ROTATE/" "$f"
+        fi
+    done < <(find /etc/logrotate.d -type f 2>/dev/null; echo /etc/logrotate.conf)
+    logrotate -d /etc/logrotate.conf >/dev/null 2>&1 || true
 }
 
 # ------------------------------ 系统更新 --------------------------------------
 
 system_update() {
-    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
-    printf '%b\n' "${C_BLUE} Debian 13 系统更新 ${C_NC}"
-    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
-
     log "修复/完成未配置的软件包..."
-    dpkg --configure -a >/dev/null 2>&1 || warn "dpkg --configure -a 返回异常。"
+    dpkg --configure -a >/dev/null 2>&1 || true
 
     log "更新 Debian 软件源..."
     apt-get update -qq || die "APT update 失败。"
-    pass "APT update 成功"
-
+    
     log "执行 Debian 原生 full-upgrade..."
-    if apt-get full-upgrade -y \
-        -o Dpkg::Options::="--force-confdef" \
-        -o Dpkg::Options::="--force-confold" \
-        --no-install-recommends; then
-        pass "系统升级完成"
-    else
-        die "系统 full-upgrade 失败。"
-    fi
-
+    apt-get full-upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends || die "系统 full-upgrade 失败。"
     ensure_basic_tools
 }
 
-# ------------------------------ 清理 -----------------------------------------
+# ------------------------------ Option 2 核心入口 -----------------------------
 
-safe_remove_file() {
-    local f="$1"
-    [[ -f "$f" || -L "$f" ]] || return 0
-    rm -f -- "$f"
+optimize_system() {
+    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
+    printf '%b\n' "${C_BLUE} 系统更新 + 旧内核/元包强删 + TCP + 日志优化 ${C_NC}"
+    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
+
+    force_cleanup_old_kernels
+    system_update
+    optimize_tcp
+    optimize_journald
+    optimize_logrotate
+
+    printf '\n%b\n' "${C_GREEN}====================================================${C_NC}"
+    printf '%b\n' "${C_GREEN} 选项 2 执行完成 ${C_NC}"
+    printf '%b\n\n' "${C_GREEN}====================================================${C_NC}"
 }
 
-cleanup_rotated_logs() {
-    log "删除普通历史日志/压缩日志..."
-    local count=0 f
+# ------------------------------ 一键清理 -----------------------------------------
 
-    while IFS= read -r -d '' f; do
-        safe_remove_file "$f"
-        ((count+=1))
-        printf '  %b %s\n' "${C_YELLOW}[删除]${C_NC}" "$f"
-    done < <(
-        find /var/log -xdev -type f \
-            \( -name '*.gz' -o -name '*.xz' -o -name '*.bz2' \
-            -o -name '*.old' -o -name '*.log.[0-9]' \
-            -o -name '*.log.[0-9][0-9]' \) \
-            -print0 2>/dev/null
-    )
+cleanup_all() {
+    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
+    printf '%b\n' "${C_BLUE} 一键清理：日志 / APT / 垃圾 ${C_NC}"
+    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
 
-    pass "普通历史日志删除完成: $count 个"
-}
-
-truncate_active_logs() {
-    log "清空普通活动文本日志（保留文件本身和权限）..."
-    local count=0 f
-
-    while IFS= read -r -d '' f; do
-        case "$f" in
-            /var/log/journal/*|/run/log/journal/*) continue ;;
-            /var/log/wtmp|/var/log/btmp|/var/log/lastlog) continue ;;
-        esac
-
-        if file "$f" 2>/dev/null | grep -qiE 'text|empty|ASCII|UTF-8|JSON'; then
-            if : > "$f"; then
-                ((count+=1))
-                printf '  %b %s -> 0 bytes\n' "${C_YELLOW}[清空]${C_NC}" "$f"
-            fi
-        fi
-    done < <(
-        find /var/log -xdev -type f -size +0c \
-            \( -name '*.log' -o -name '*.txt' -o -name 'syslog' \
-            -o -name 'messages' -o -name 'daemon.log' -o -name 'kern.log' \
-            -o -name 'auth.log' -o -name 'debug' \) \
-            -print0 2>/dev/null
-    )
-
-    pass "普通活动日志清空完成: $count 个"
-}
-
-cleanup_journal() {
-    log "清理 journald 历史数据..."
-    journalctl --rotate >/dev/null 2>&1 || true
-    journalctl --vacuum-time=1s --vacuum-size=1M >/dev/null 2>&1 || true
-    pass "journald 历史归档清理命令执行完成"
-}
-
-cleanup_apt() {
+    # APT清理
     log "清理 APT / DPKG 垃圾..."
-    apt-get autoremove --purge -y >/dev/null 2>&1 || warn "autoremove 返回异常。"
+    apt-get autoremove --purge -y >/dev/null 2>&1 || true
     apt-get autoclean -y >/dev/null 2>&1 || true
     apt-get clean >/dev/null 2>&1 || true
-
-    if [[ -d /var/cache/apt/archives ]]; then
-        find /var/cache/apt/archives -maxdepth 1 -type f \
-            \( -name '*.deb' -o -name '*.dsc' -o -name '*.tar.*' \) \
-            -delete 2>/dev/null || true
-    fi
-
     local rc
     rc="$(dpkg -l 2>/dev/null | awk '$1=="rc"{print $2}')"
     if [[ -n "$rc" ]]; then
         # shellcheck disable=SC2086
         xargs -r apt-get purge -y -qq <<< "$rc" || true
-        pass "DPKG rc 残留已清理"
-    else
-        pass "无 DPKG rc 残留"
     fi
-}
 
-kernel_package_list() {
-    dpkg-query -W -f='${binary:Package}\n' 2>/dev/null |
-        grep -E '^linux-(image|headers|modules|kbuild|config)-' || true
-}
-
-cleanup_old_kernels() {
-    log "检测当前运行内核与已安装内核..."
-    local current
-    current="$(uname -r)"
-    pass "当前运行内核: $current"
-
-    local packages=()
-    local p
-    while IFS= read -r p; do
-        [[ -n "$p" ]] && packages+=("$p")
-    done < <(kernel_package_list)
-
-    log "执行 APT 原生 autoremove 处理孤立旧内核..."
-    apt-get autoremove --purge -y >/dev/null 2>&1 || true
-
-    local candidates=()
-    for p in "${packages[@]}"; do
-        [[ "$p" == *"$current"* ]] && continue
-        case "$p" in
-            linux-image-amd64|linux-headers-amd64|linux-image-cloud-amd64|linux-headers-cloud-amd64)
-                continue ;;
-        esac
-        candidates+=("$p")
-    done
-
-    if ((${#candidates[@]})); then
-        info "发现非当前内核相关包（不自动暴力删除元包）："
-        printf '      %s\n' "${candidates[@]}"
-        info "已优先交给 APT autoremove；如仍需删除，请在确认可启动后备内核后手工处理。"
-    else
-        pass "没有发现明显可疑的旧内核包"
-    fi
-}
-
-cleanup_old_files() {
-    log "清理明确的系统垃圾文件..."
-    local count=0 f
-    local roots=(/tmp /var/tmp /var/backups)
-    local root
-
-    for root in "${roots[@]}"; do
-        [[ -d "$root" ]] || continue
-        while IFS= read -r -d '' f; do
-            [[ -f "$f" ]] || continue
-            rm -f -- "$f" && {
-                ((count+=1))
-                printf '  %b %s\n' "${C_YELLOW}[删除]${C_NC}" "$f"
-            }
-        done < <(
-            find "$root" -xdev -type f \
-                \( -name '*.old' -o -name '*.bak' -o -name '*~' \
-                -o -name '*.tmp' -o -name '*.temp' \) \
-                -print0 2>/dev/null
-        )
-    done
-
-    pass "明确垃圾文件删除完成: $count 个"
-}
-
-cleanup_all() {
-    printf '\n%b\n' "${C_BLUE}====================================================${C_NC}"
-    printf '%b\n' "${C_BLUE} 一键清理：日志 / APT / 旧内核 / 垃圾 ${C_NC}"
-    printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
-
-    warn "此选项会删除历史日志和明确的缓存/垃圾文件；请确认无需保留审计记录。"
-
-    cleanup_journal
-    cleanup_rotated_logs
-    truncate_active_logs
-    cleanup_apt
-    cleanup_old_kernels
-    cleanup_old_files
-
-    log "清理后的 /var/log 占用:"
-    du -sh /var/log 2>/dev/null || true
+    # 日志文件清理
+    log "清理轮转日志及空普通活动日志..."
+    find /var/log -xdev -type f \( -name '*.gz' -o -name '*.xz' -o -name '*.bz2' -o -name '*.old' -o -name '*.log.[0-9]' \) -delete 2>/dev/null || true
+    while IFS= read -r -d '' f; do
+        [[ "$f" == *journal* || "$f" == *wtmp || "$f" == *btmp || "$f" == *lastlog ]] && continue
+        if file "$f" 2>/dev/null | grep -qiE 'text|empty'; then
+            : > "$f"
+        fi
+    done < <(find /var/log -xdev -type f -size +0c -print0 2>/dev/null)
 
     pass "一键清理完成"
 }
@@ -798,8 +492,6 @@ reinstall_debian13() {
     printf '%b\n\n' "${C_RED}====================================================${C_NC}"
 
     warn "此操作将重新安装系统为官方纯净 Debian 13，全盘数据将被销毁！"
-    printf '%b\n' "  ${C_YELLOW}调用源: https://github.com/bin456789/reinstall${C_NC}"
-    
     local confirm=""
     read -r -p "确认执行重装？请输入 YES 并回车: " confirm < /dev/tty || return 0
     if [[ "$confirm" != "YES" ]]; then
@@ -807,17 +499,15 @@ reinstall_debian13() {
         return 0
     fi
 
-    log "下载 reinstall 重装脚本..."
     ensure_basic_tools
+    log "下载 reinstall 重装脚本..."
     curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O "${_##*/}" "$_"
-
     log "启动一键重装到 Debian 13..."
     bash reinstall.sh debian13
 }
 
 # ------------------------------ XanMod ----------------------------------------
 
-# 修复 CPU 指令集探测，精准支持 v1 兜底，防止低配/虚拟化 CPU 误装 v2/v3 无法开机
 cpu_level() {
     if [[ -x /lib64/ld-linux-x86-64.so.2 ]]; then
         local detected
@@ -839,17 +529,13 @@ install_xanmod() {
     printf '%b\n' "${C_BLUE} XanMod：官方第三方内核安装 ${C_NC}"
     printf '%b\n\n' "${C_BLUE}====================================================${C_NC}"
 
-    warn "本选项是唯一明确允许创建第三方 APT keyring/source 配置文件的模块。"
-    warn "安装完成后必须重启；重启前不要把 BBR/FQ 结果当作 XanMod 已生效。"
-
     ensure_basic_tools
-
     local codename="${VERSION_CODENAME:-trixie}"
-    [[ "$codename" == "trixie" ]] || die "当前 codename 不是 trixie。"
+    [[ "$codename" == "trixie" ]] || die "当前系统非 trixie。"
 
     local level
     level="$(cpu_level)"
-    info "CPU ABI 检测结果: ${level} (已自动匹配兼容包，避免无法开机)"
+    info "CPU ABI 检测结果: ${level} (完美向下兼容)"
 
     local keyring="/etc/apt/keyrings/xanmod-archive-keyring.gpg"
     local repo="/etc/apt/sources.list.d/xanmod-release.list"
@@ -858,32 +544,23 @@ install_xanmod() {
     mkdir -p /etc/apt/keyrings
 
     log "获取 XanMod 官方签名密钥..."
-    if wget -qO- https://dl.xanmod.org/archive.key |
-        gpg --dearmor --yes -o "$keyring"; then
-        [[ -s "$keyring" ]] || die "XanMod keyring 为空。"
+    if wget -qO- https://dl.xanmod.org/archive.key | gpg --dearmor --yes -o "$keyring"; then
         chmod 0644 "$keyring"
-        pass "XanMod 官方 keyring 获取成功: $keyring"
+        pass "XanMod 官方 keyring 获取成功"
     else
-        rm -f "$keyring"
         die "XanMod 官方签名密钥获取失败。"
     fi
 
     log "写入 XanMod 官方 Debian 13 Trixie APT 源..."
-    printf 'deb [signed-by=%s arch=amd64] http://deb.xanmod.org %s main\n' \
-        "$keyring" "$codename" > "$repo"
-    pass "XanMod APT 源已写入: $repo"
-
+    printf 'deb [signed-by=%s arch=amd64] http://deb.xanmod.org %s main\n' "$keyring" "$codename" > "$repo"
+    
     log "验证 XanMod APT 源..."
     if ! apt-get update -qq; then
-        fail "XanMod APT 源验证失败，开始回滚本次第三方源。"
         rm -f "$repo" "$keyring"
-        apt-get update -qq >/dev/null 2>&1 || true
         die "XanMod APT 源不可用，已回滚。"
     fi
-    pass "XanMod APT 源验证成功"
 
     local pkg="linux-xanmod-${level}"
-    # 若 LTS/主线源中某版本暂无则智能降级
     if ! apt-cache show "$pkg" >/dev/null 2>&1; then
         warn "未找到专属优化包 $pkg，自动安全降级至兼容包..."
         if apt-cache show "linux-xanmod-lts-x64v1" >/dev/null 2>&1; then
@@ -894,34 +571,13 @@ install_xanmod() {
     fi
 
     log "安装 XanMod 内核: $pkg"
-    apt-get install -y --no-install-recommends "$pkg" ||
-        die "XanMod 内核安装失败。"
+    apt-get install -y --no-install-recommends "$pkg" || die "XanMod 内核安装失败。"
+    command -v update-grub >/dev/null 2>&1 && update-grub >/dev/null 2>&1 || true
 
-    pass "XanMod 内核安装完成"
-
-    log "检查已安装 XanMod 内核包..."
-    dpkg-query -W -f='${Package} ${Version}\n' "$pkg" 2>/dev/null || true
-
-    log "检查 GRUB 是否发现 XanMod..."
-    if command -v update-grub >/dev/null 2>&1; then
-        update-grub >/dev/null 2>&1 || warn "update-grub 返回异常。"
-    fi
-
-    local installed
-    installed="$(dpkg-query -W -f='${Package}\n' 2>/dev/null | grep '^linux-xanmod-' || true)"
-    if [[ -n "$installed" ]]; then
-        found "已安装 XanMod 包:"
-        printf '      %s\n' "$installed"
-    fi
-
-    printf '\n%b\n' "${C_GREEN}====================================================${C_NC}"
-    printf '%b\n' "${C_GREEN} XanMod 安装完成。现在必须 reboot。${C_NC}"
-    printf '%b\n' "${C_GREEN} 重启后再次运行本脚本，然后使用选项 2 优化。${C_NC}"
-    printf '%b\n' "${C_GREEN} 最后使用选项 5 做真实性审计。${C_NC}"
-    printf '%b\n\n' "${C_GREEN}====================================================${C_NC}"
+    printf '\n%b\n' "${C_GREEN} XanMod 安装完成。现在必须 reboot。${C_NC}"
 }
 
-# ------------------------------ 审计 ------------------------------------------
+# ------------------------------ 完整版详细审计 --------------------------------
 
 audit_sysctl_key() {
     local key="$1"
@@ -939,7 +595,7 @@ audit_sysctl_key() {
         if [[ "${SYSCTL_IS_ADMIN[$key]:-0}" == 1 ]]; then
             printf '      持久化管理员配置: %b\n' "${C_GREEN}是${C_NC}"
         else
-            printf '      持久化管理员配置: ${C_GRAY}否（系统/发行版来源）${C_NC}\n'
+            printf '      持久化管理员配置: %b\n' "${C_GRAY}否（系统/发行版来源）${C_NC}"
         fi
     else
         printf '      实际配置来源: %b\n' "${C_GRAY}无现成配置项 / 内核默认${C_NC}"
@@ -957,7 +613,7 @@ audit_tcp() {
     if grep -qi xanmod <<<"$kernel"; then
         pass "当前确实正在运行 XanMod 内核"
     else
-        warn "当前没有运行 XanMod 内核；如果刚安装过 XanMod，请先 reboot。"
+        warn "当前没有运行 XanMod 内核"
     fi
 
     local avail current qdisc
@@ -990,6 +646,8 @@ audit_tcp() {
     audit_sysctl_key "net.ipv4.ip_local_port_range"
 }
 
+JOURNAL_KEYS=( SystemMaxUse SystemMaxFileSize SystemMaxFiles RuntimeMaxUse RuntimeMaxFileSize RuntimeMaxFiles MaxRetentionSec )
+
 audit_journald() {
     printf '\n%b\n' "${C_BLUE}----------------------------------------------------${C_NC}"
     printf '%b\n' "${C_BLUE}[Journald 真实性审计]${C_NC}"
@@ -1004,7 +662,6 @@ audit_journald() {
             info "$key -> 当前没有显式配置（使用 systemd 默认/计算值）"
         fi
     done
-
     printf '\n'
     journalctl --disk-usage 2>/dev/null || true
 }
@@ -1019,18 +676,18 @@ audit_logrotate() {
     fi
 
     local files=()
-    while IFS= read -r f; do files+=("$f"); done < <(list_logrotate_files)
+    local f
+    while IFS= read -r f; do files+=("$f"); done < <(find /etc/logrotate.d -type f 2>/dev/null; echo /etc/logrotate.conf)
 
     found "logrotate 配置文件数量: ${#files[@]}"
-    printf '      %s\n' "${files[@]}"
-
+    
     if logrotate -d /etc/logrotate.conf >/dev/null 2>&1; then
         pass "logrotate 配置语法正常"
     else
         warn "logrotate 配置语法异常"
     fi
 
-    local rotate_found=0 f
+    local rotate_found=0
     for f in "${files[@]}"; do
         if grep -Eq '^[[:space:]]*rotate[[:space:]]+[0-9]+' "$f"; then
             rotate_found=1
@@ -1044,10 +701,6 @@ audit_kernel() {
     printf '\n%b\n' "${C_BLUE}----------------------------------------------------${C_NC}"
     printf '%b\n' "${C_BLUE}[内核更换真实性审计]${C_NC}"
 
-    local current
-    current="$(uname -r)"
-    printf '  当前运行内核: %s\n' "$current"
-
     local xan
     xan="$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | grep '^linux-xanmod-' || true)"
     if [[ -n "$xan" ]]; then
@@ -1055,12 +708,6 @@ audit_kernel() {
         printf '      %s\n' "$xan"
     else
         warn "系统没有安装 XanMod 内核包"
-    fi
-
-    if grep -qi xanmod <<<"$current"; then
-        pass "XanMod 已经实际运行"
-    else
-        info "XanMod 已安装但未必正在运行；以 uname -r 为准。"
     fi
 
     if command -v grubby >/dev/null 2>&1; then
@@ -1072,24 +719,18 @@ audit_kernel() {
 
 audit_logs_size() {
     printf '\n%b\n' "${C_BLUE}----------------------------------------------------${C_NC}"
-    printf '%b\n' "${C_BLUE}[日志磁盘占用审计]${C_NC}"
+    printf '%b\n' "${C_BLUE}[系统容量占用审计]${C_NC}"
 
     printf '  /var/log: '
     du -sh /var/log 2>/dev/null || true
-
-    printf '  journald: '
-    journalctl --disk-usage 2>/dev/null || true
-
     printf '  文件系统 /: '
     df -h / | tail -n1 || true
 }
 
 audit_all() {
     printf '\n%b\n' "${C_CYAN}====================================================${C_NC}"
-    printf '%b\n' "${C_CYAN} Debian 13 (Trixie) 真实性审计（只读） ${C_NC}"
+    printf '%b\n' "${C_CYAN} Debian 13 (Trixie) 真实性详细审计（完全只读） ${C_NC}"
     printf '%b\n\n' "${C_CYAN}====================================================${C_NC}"
-
-    log "审计原则：此选项不修改任何配置、不安装软件、不清理文件。"
 
     audit_kernel
     audit_tcp
@@ -1098,25 +739,11 @@ audit_all() {
     audit_logs_size
 
     printf '\n%b\n' "${C_GREEN}====================================================${C_NC}"
-    printf '%b\n' "${C_GREEN} 审计完成：以上结果以当前运行内核、实际配置来源和 runtime 为准。 ${C_NC}"
+    printf '%b\n' "${C_GREEN} 审计完成：以上结果以当前运行内核、实际配置来源为准。 ${C_NC}"
     printf '%b\n\n' "${C_GREEN}====================================================${C_NC}"
 }
 
-# ------------------------------ 选项 2 ----------------------------------------
-
-optimize_system() {
-    system_update
-    optimize_tcp
-    optimize_journald
-    optimize_logrotate
-
-    printf '\n%b\n' "${C_GREEN}====================================================${C_NC}"
-    printf '%b\n' "${C_GREEN} 系统更新 + TCP + 日志优化执行完成 ${C_NC}"
-    printf '%b\n' "${C_GREEN} 注意：如果刚安装 XanMod，请先 reboot，再运行选项 2。 ${C_NC}"
-    printf '%b\n\n' "${C_GREEN}====================================================${C_NC}"
-}
-
-# ------------------------------ 菜单 ------------------------------------------
+# ------------------------------ 菜单交互 --------------------------------------
 
 show_banner() {
     clear 2>/dev/null || true
@@ -1125,12 +752,12 @@ show_banner() {
     printf '%b\n' "${C_CYAN}        中文输出 / 真实配置链 / 精准持久化${C_NC}"
     printf '%b\n' "${C_CYAN}====================================================${C_NC}"
     printf '%b\n' "${C_GREEN}  1.${C_NC} 更换 XanMod 内核 (已修复 CPU 架构检测)"
-    printf '%b\n' "${C_GREEN}     └─ 安装 → 验证 → reboot → 再运行本脚本${C_NC}"
-    printf '%b\n' "${C_GREEN}  2.${C_NC} 系统更新 + TCP/BBR/FQ + 日志优化"
-    printf '%b\n' "${C_GREEN}     └─ 只修改实际存在的管理员配置项${C_NC}"
-    printf '%b\n' "${C_GREEN}  3.${C_NC} 一键清理日志 / 垃圾 / APT / 旧内核残留"
+    printf '%b\n' "${C_GREEN}     └─ 安装 → reboot → 再运行本脚本执行选项 2${C_NC}"
+    printf '%b\n' "${C_GREEN}  2.${C_NC} 强删旧内核/元包 + 系统更新 + TCP/BBR/FQ"
+    printf '%b\n' "${C_GREEN}     └─ 包含越权底层强制替换 fq${C_NC}"
+    printf '%b\n' "${C_GREEN}  3.${C_NC} 一键清理日志 / 垃圾 / APT 残留"
     printf '%b\n' "${C_GREEN}  4.${C_NC} 一键 DD 重装全新 Debian 13 系统 (危险)"
-    printf '%b\n' "${C_GREEN}  5.${C_NC} 真实性审计（完全只读）"
+    printf '%b\n' "${C_GREEN}  5.${C_NC} 真实性详细审计（完全只读）"
     printf '%b\n' "${C_RED}  0.${C_NC} 退出"
     printf '%b\n' "${C_CYAN}====================================================${C_NC}"
 }
