@@ -3,113 +3,350 @@
 set -u
 export LC_ALL=C
 
+# ============================================================
+# Debian 13 日志大小审计与精准限制
+# 扫描 → 识别 → 分类 → 建议 → 确认 → 修改 → 验证
+#
+# 规则：
+#   - 普通日志：按用途设置 1M–10M
+#   - journald：单文件 8M
+#   - 只修改真实存在且确认控制目标的配置
+#   - 不创建配置文件
+#   - 不备份
+#   - 不删除现有日志
+#   - 不安装软件
+# ============================================================
+
 TARGET_MIN=1
-TARGET_MAX=10
-JOURNAL_MAX=8M
+JOURNAL_MAX=8
 
 LOGROTATE_MAIN="/etc/logrotate.conf"
 LOGROTATE_DIR="/etc/logrotate.d"
-JOURNAL_CONF="/etc/systemd/journald.conf"
+JOURNALD_CONF="/etc/systemd/journald.conf"
 
-declare -a LOG_FILES
-declare -a LOG_TYPES
-declare -a LOG_SIZES
-declare -a LOG_CONFIGS
-declare -a LOG_LIMITS
-declare -a LOG_SUGGESTIONS
+TMPROOT="$(mktemp -d /tmp/log-audit.XXXXXX)"
+trap 'rm -rf "$TMPROOT"' EXIT
 
-declare -a MOD_LOG
-declare -a MOD_CFG
-declare -a MOD_VALUE
-declare -a MOD_STANZA_START
-declare -a MOD_STANZA_END
+LOG_LIST="$TMPROOT/logs"
+STANZAS="$TMPROOT/stanzas"
+PLAN="$TMPROOT/plan"
 
-TMP_DIR=""
-MOD_COUNT=0
-JOURNAL_MOD=0
-FAIL_COUNT=0
+: > "$LOG_LIST"
+: > "$STANZAS"
+: > "$PLAN"
 
-cleanup() {
-    if [[ -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]]; then
-        rm -rf "$TMP_DIR"
-    fi
-}
-trap cleanup EXIT
+# ------------------------------------------------------------
+# 基础函数
+# ------------------------------------------------------------
 
 die() {
     echo "错误：$*"
     exit 1
 }
 
-[[ $EUID -eq 0 ]] || die "必须使用 root 运行。"
+section() {
+    echo
+    echo "============================================================"
+    echo "$1"
+    echo "============================================================"
+}
 
-command -v python3 >/dev/null 2>&1 || die "系统缺少 python3。"
-command -v logrotate >/dev/null 2>&1 || die "系统缺少 logrotate。"
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "系统缺少 $1"
+}
 
-TMP_DIR="$(mktemp -d)" || die "无法创建临时工作目录。"
+size_human() {
+    local f="$1"
+    local s
 
-clear 2>/dev/null || true
+    s=$(stat -c '%s' "$f" 2>/dev/null || echo 0)
 
-echo "============================================================"
-echo " Debian 13 日志大小审计与精准限制"
-echo " 扫描 → 识别 → 分类 → 建议 → 确认 → 精准修改 → 验证"
-echo "============================================================"
-echo
-echo "目标：普通日志 1M–10M；journald 单文件 8M"
+    if [ "$s" -ge 1073741824 ]; then
+        awk -v x="$s" 'BEGIN{printf "%.2fG",x/1073741824}'
+    elif [ "$s" -ge 1048576 ]; then
+        awk -v x="$s" 'BEGIN{printf "%.2fM",x/1048576}'
+    elif [ "$s" -ge 1024 ]; then
+        awk -v x="$s" 'BEGIN{printf "%.2fK",x/1024}'
+    else
+        echo "${s}B"
+    fi
+}
+
+get_bytes() {
+    stat -c '%s' "$1" 2>/dev/null || echo 0
+}
+
+is_regular_log() {
+    local f="$1"
+
+    [ -f "$f" ] || return 1
+
+    case "$f" in
+        *.journal|*.journal~)
+            return 1
+            ;;
+        /var/log/journal/*)
+            return 1
+            ;;
+        /run/log/journal/*)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------
+# 1. 基础检测
+# ------------------------------------------------------------
+
+[ "$(id -u)" -eq 0 ] || die "请使用 root 运行"
+
+for c in bash awk sed grep find stat systemctl logrotate; do
+    need_cmd "$c"
+done
+
+[ -f /etc/os-release ] || die "无法读取 /etc/os-release"
+
+. /etc/os-release
+
+case "${ID:-}" in
+    debian) ;;
+    *)
+        echo "警告：当前系统不是 Debian，继续执行前请确认。"
+        ;;
+esac
+
+section "Debian 日志大小审计与精准限制"
+
+echo "目标："
+echo "  普通日志：按用途设置 1M–10M"
+echo "  journald ：单个 journal 文件 8M"
 echo
 echo "原则："
-echo "  ✓ 只修改真实存在且实际控制日志的配置文件"
-echo "  ✓ 按 logrotate stanza 精确识别"
-echo "  ✓ 修改后重新解析同一 stanza 验证"
+echo "  ✓ 只修改真实存在的控制配置"
+echo "  ✓ 必须确认配置实际控制目标日志"
+echo "  ✓ 精确修改对应 stanza"
 echo "  ✓ 不创建任何配置文件"
 echo "  ✓ 不备份"
 echo "  ✓ 不删除现有日志"
+echo "  ✓ 不安装软件"
 echo "  ✓ 控制关系无法确认 → 跳过"
+
+section "[1/8] 系统检测"
+
+echo "  OS       : ${PRETTY_NAME:-unknown}"
+echo "  Kernel   : $(uname -r)"
+
+if [ -d /var/log ]; then
+    echo "  /var/log : $(du -sh /var/log 2>/dev/null | awk '{print $1}')"
+else
+    echo "  /var/log : 不存在"
+fi
+
+if [ -d /run/log ]; then
+    echo "  /run/log : $(du -sh /run/log 2>/dev/null | awk '{print $1}')"
+else
+    echo "  /run/log : 不存在"
+fi
+
+# ------------------------------------------------------------
+# 2. 扫描日志
+# ------------------------------------------------------------
+
+section "[2/8] 扫描实际日志文件"
+
+find /var/log -type f -print0 2>/dev/null |
+while IFS= read -r -d '' f; do
+    if is_regular_log "$f"; then
+        printf '%s\n' "$f"
+    fi
+done | sort > "$LOG_LIST"
+
+LOG_COUNT=$(wc -l < "$LOG_LIST")
+
+echo "  找到 $LOG_COUNT 个普通日志文件"
+
+# ------------------------------------------------------------
+# 3. 解析 logrotate
+#
+# 每个 stanza 保存：
+#   文件
+#   起始行
+#   结束行
+#   匹配 pattern
+# ------------------------------------------------------------
+
+section "[3/8] 精确解析 logrotate 控制关系"
+
+: > "$STANZAS"
+
+parse_logrotate_file() {
+    local file="$1"
+
+    [ -f "$file" ] || return 0
+
+    awk -v FILE="$file" '
+    function trim(s) {
+        sub(/^[[:space:]]+/, "", s)
+        sub(/[[:space:]]+$/, "", s)
+        return s
+    }
+
+    function flush_stanza(    i) {
+        if (start == 0 || count == 0)
+            return
+
+        for (i = 1; i <= count; i++) {
+            printf "%s\t%d\t%d\t%s\n",
+                FILE, start, end, paths[i]
+        }
+
+        delete paths
+        count = 0
+        start = 0
+        end = 0
+    }
+
+    {
+        raw=$0
+        line=$0
+
+        # 去掉注释
+        sub(/[[:space:]]*#.*/, "", line)
+        line=trim(line)
+
+        if (line == "")
+            next
+
+        # include 不属于 stanza
+        if (line ~ /^include[[:space:]]+/)
+            next
+
+        # 新 stanza：必须以 { 结束
+        if (line ~ /^[^{}]+[[:space:]]*\{[[:space:]]*$/) {
+            flush_stanza()
+
+            start=NR
+
+            p=line
+            sub(/[[:space:]]*\{[[:space:]]*$/, "", p)
+            p=trim(p)
+
+            # 多个日志路径
+            n=split(p,a,/[[:space:]]+/)
+
+            count=0
+
+            for (i=1; i<=n; i++) {
+                if (a[i] != "")
+                    paths[++count]=a[i]
+            }
+
+            next
+        }
+
+        if (start > 0) {
+            end=NR
+
+            if (line == "}") {
+                flush_stanza()
+            }
+        }
+    }
+
+    END {
+        flush_stanza()
+    }
+    ' "$file" >> "$STANZAS"
+}
+
+parse_logrotate_file "$LOGROTATE_MAIN"
+
+if [ -d "$LOGROTATE_DIR" ]; then
+    find "$LOGROTATE_DIR" -maxdepth 1 -type f -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+        parse_logrotate_file "$f"
+    done
+fi
+
+# ------------------------------------------------------------
+# 处理 logrotate include / glob 的实际关系
+# ------------------------------------------------------------
+
+# 当前 Debian 默认 /etc/logrotate.conf 通常 include /etc/logrotate.d
+# 这里不把 include 文件本身当作日志 stanza。
+#
+# STANZAS 格式：
+# file<TAB>start<TAB>end<TAB>pattern
+
+STANZA_COUNT=$(wc -l < "$STANZAS")
+
 echo
+echo "  解析到 $STANZA_COUNT 个日志 stanza"
 
-##############################################################################
-# 基础信息
-##############################################################################
+# ------------------------------------------------------------
+# glob 匹配辅助
+# ------------------------------------------------------------
 
-echo "[1/8] 系统检测"
+glob_match() {
+    local pattern="$1"
+    local path="$2"
 
-OS_NAME="$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-unknown}")"
-KERNEL="$(uname -r)"
-CPU="$(nproc 2>/dev/null || echo "?")"
-RAM_MB="$(awk '/MemTotal:/ {printf "%.0f", $2/1024}' /proc/meminfo 2>/dev/null)"
-VARLOG_SIZE="$(du -sh /var/log 2>/dev/null | awk '{print $1}')"
-RUNLOG_SIZE="$(du -sh /run/log 2>/dev/null | awk '{print $1}' 2>/dev/null || echo 0)"
+    # 处理 logrotate 常见路径 glob
+    case "$path" in
+        $pattern)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
-echo "  OS       : $OS_NAME"
-echo "  Kernel   : $KERNEL"
-echo "  CPU      : ${CPU} cores"
-echo "  RAM      : ${RAM_MB:-?} MB"
-echo "  /var/log : ${VARLOG_SIZE:-?}"
-echo "  /run/log : ${RUNLOG_SIZE:-0}"
-echo
+# ------------------------------------------------------------
+# 判断 stanza 是否真的控制目标
+#
+# 只接受：
+#   1. 精确路径
+#   2. shell glob 实际匹配目标
+#
+# 不接受：
+#   - basename 推测
+#   - 配置文件名称推测
+#   - 仅仅同目录推测
+# ------------------------------------------------------------
 
-##############################################################################
-# 扫描日志
-##############################################################################
+find_controller() {
+    local target="$1"
+    local result
 
-echo "[2/8] 扫描实际日志文件"
+    result=$(
+        while IFS=$'\t' read -r file start end pattern; do
 
-mapfile -d '' LOG_FILES < <(
-    find /var/log /run/log \
-        -xdev \
-        -type f \
-        -print0 2>/dev/null |
-    sort -z
-)
+            [ -n "$file" ] || continue
 
-LOG_COUNT="${#LOG_FILES[@]}"
+            # 去除可能的引号
+            pattern="${pattern#\"}"
+            pattern="${pattern%\"}"
+            pattern="${pattern#\'}"
+            pattern="${pattern%\'}"
 
-echo "  找到 ${LOG_COUNT} 个当前日志文件"
-echo
+            if glob_match "$pattern" "$target"; then
+                printf '%s\t%s\t%s\t%s\n' \
+                    "$file" "$start" "$end" "$pattern"
+            fi
 
-##############################################################################
-# 日志分类
-##############################################################################
+        done < "$STANZAS"
+    )
+
+    printf '%s\n' "$result"
+}
+
+# ------------------------------------------------------------
+# 分类
+# ------------------------------------------------------------
 
 classify_log() {
     local f="$1"
@@ -127,9 +364,6 @@ classify_log() {
         /var/log/apt/term.log)
             echo "apt-terminal"
             ;;
-        /var/log/apt/eipp.log.xz)
-            echo "apt-planner"
-            ;;
         /var/log/btmp)
             echo "failed-login-history"
             ;;
@@ -139,23 +373,38 @@ classify_log() {
         /var/log/lastlog)
             echo "lastlog"
             ;;
-        /var/log/wtmp.db)
-            echo "wtmp-db"
+        /var/log/auth.log|/var/log/auth.log.*)
+            echo "authentication"
             ;;
-        /var/log/installer/*)
-            echo "installer"
+        /var/log/syslog|/var/log/syslog.*)
+            echo "system"
             ;;
-        /var/log/journal/*.journal/*)
-            echo "journald"
+        /var/log/kern.log|/var/log/kern.log.*)
+            echo "kernel"
             ;;
-        /run/log/journal/*.journal/*)
-            echo "journald"
+        /var/log/daemon.log|/var/log/daemon.log.*)
+            echo "daemon"
             ;;
-        /var/log/journal/*/*)
-            echo "journald"
+        /var/log/debug|/var/log/debug.*)
+            echo "debug"
             ;;
-        /run/log/journal/*/*)
-            echo "journald"
+        /var/log/messages|/var/log/messages.*)
+            echo "messages"
+            ;;
+        /var/log/mail.log|/var/log/mail.log.*)
+            echo "mail"
+            ;;
+        /var/log/mail.err|/var/log/mail.err.*)
+            echo "mail-error"
+            ;;
+        /var/log/mail.warn|/var/log/mail.warn.*)
+            echo "mail-warning"
+            ;;
+        /var/log/user.log|/var/log/user.log.*)
+            echo "user"
+            ;;
+        /var/log/faillog)
+            echo "failed-login"
             ;;
         *)
             echo "unknown"
@@ -163,720 +412,598 @@ classify_log() {
     esac
 }
 
-recommend_log() {
+# ------------------------------------------------------------
+# 根据日志用途确定建议
+#
+# 注意：
+# 不是根据当前文件大小决定。
+# ------------------------------------------------------------
+
+recommend_size() {
     local type="$1"
 
     case "$type" in
         alternatives)
-            echo "2M"
+            echo "2"
             ;;
         apt-history)
-            echo "3M"
+            echo "3"
             ;;
         apt-terminal)
-            echo "5M"
-            ;;
-        apt-planner)
-            echo "SKIP"
+            echo "5"
             ;;
         dpkg)
-            echo "5M"
+            echo "5"
             ;;
         failed-login-history)
-            echo "5M"
+            echo "5"
             ;;
         login-history)
-            echo "5M"
+            echo "5"
+            ;;
+        authentication)
+            echo "10"
+            ;;
+        system)
+            echo "10"
+            ;;
+        kernel)
+            echo "10"
+            ;;
+        daemon)
+            echo "10"
+            ;;
+        messages)
+            echo "10"
+            ;;
+        mail)
+            echo "10"
+            ;;
+        mail-error)
+            echo "5"
+            ;;
+        mail-warning)
+            echo "5"
+            ;;
+        user)
+            echo "5"
+            ;;
+        failed-login)
+            echo "5"
             ;;
         lastlog)
-            echo "5M"
-            ;;
-        wtmp-db)
-            echo "SKIP"
-            ;;
-        installer)
-            echo "SKIP"
-            ;;
-        journald)
-            echo "SKIP"
+            echo "5"
             ;;
         *)
-            echo "SKIP"
+            echo "0"
             ;;
     esac
 }
 
-human_size() {
-    local bytes="$1"
+# ------------------------------------------------------------
+# 读取 stanza 内当前限制
+# ------------------------------------------------------------
 
-    if (( bytes >= 1073741824 )); then
-        awk -v n="$bytes" 'BEGIN {printf "%.2fG", n/1073741824}'
-    elif (( bytes >= 1048576 )); then
-        awk -v n="$bytes" 'BEGIN {printf "%.2fM", n/1048576}'
-    elif (( bytes >= 1024 )); then
-        awk -v n="$bytes" 'BEGIN {printf "%.2fK", n/1024}'
+get_stanza_option() {
+    local file="$1"
+    local start="$2"
+    local end="$3"
+    local option="$4"
+
+    sed -n "${start},${end}p" "$file" |
+        sed 's/[[:space:]]*#.*$//' |
+        awk -v opt="$option" '
+        $1 == opt {
+            print $2
+            exit
+        }
+        '
+}
+
+# ------------------------------------------------------------
+# 建立审计结果
+# 格式：
+# log
+# type
+# size
+# controller
+# start
+# end
+# pattern
+# current
+# recommendation
+# ------------------------------------------------------------
+
+RESULTS="$TMPROOT/results"
+: > "$RESULTS"
+
+section "[4/8] 检测日志实际控制关系"
+
+FOUND=0
+UNKNOWN=0
+JOURNAL_COUNT=0
+
+while IFS= read -r log; do
+
+    type=$(classify_log "$log")
+    size=$(size_human "$log")
+    rec=$(recommend_size "$type")
+
+    controller=$(find_controller "$log")
+
+    if [ -n "$controller" ]; then
+
+        # 一个日志理论上可能匹配多个 stanza。
+        # 只有唯一明确控制关系才自动进入修改计划。
+        matches=$(printf '%s\n' "$controller" | sed '/^$/d' | wc -l)
+
+        if [ "$matches" -eq 1 ]; then
+
+            IFS=$'\t' read -r cfile start end pattern <<EOF
+$controller
+EOF
+
+            current=$(get_stanza_option \
+                "$cfile" "$start" "$end" "maxsize")
+
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$log" \
+                "$type" \
+                "$size" \
+                "$cfile" \
+                "$start" \
+                "$end" \
+                "$pattern" \
+                "${current:-未设置}" \
+                "$rec" >> "$RESULTS"
+
+            FOUND=$((FOUND + 1))
+
+        else
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$log" \
+                "$type" \
+                "$size" \
+                "多个匹配" \
+                "-" \
+                "-" \
+                "-" \
+                "无法唯一确认" \
+                "跳过" >> "$RESULTS"
+
+            UNKNOWN=$((UNKNOWN + 1))
+        fi
+
     else
-        echo "${bytes}B"
+
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$log" \
+            "$type" \
+            "$size" \
+            "未找到" \
+            "-" \
+            "-" \
+            "-" \
+            "未设置" \
+            "跳过" >> "$RESULTS"
+
+        UNKNOWN=$((UNKNOWN + 1))
     fi
-}
 
-##############################################################################
-# 精确解析 logrotate
-##############################################################################
+done < "$LOG_LIST"
 
-echo "[3/8] 精确检测 logrotate 控制关系"
 echo
+echo "  已确认唯一控制关系：$FOUND"
+echo "  未确认控制关系    ：$UNKNOWN"
 
-python3 - "$LOGROTATE_MAIN" "$LOGROTATE_DIR" "$TMP_DIR/stanzas" <<'PY'
-import os
-import sys
-import glob
-import re
-
-main = sys.argv[1]
-directory = sys.argv[2]
-out = sys.argv[3]
-
-files = []
-
-if os.path.isfile(main):
-    files.append(main)
-
-if os.path.isdir(directory):
-    for p in sorted(glob.glob(directory + "/*")):
-        if os.path.isfile(p) and not os.path.islink(p):
-            files.append(p)
-
-def strip_comment(line):
-    out = []
-    quote = None
-    esc = False
-
-    for c in line:
-        if esc:
-            out.append(c)
-            esc = False
-            continue
-
-        if c == "\\":
-            out.append(c)
-            esc = True
-            continue
-
-        if quote:
-            out.append(c)
-            if c == quote:
-                quote = None
-            continue
-
-        if c in ("'", '"'):
-            quote = c
-            out.append(c)
-            continue
-
-        if c == "#":
-            break
-
-        out.append(c)
-
-    return "".join(out)
-
-records = []
-
-for path in files:
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-    except Exception:
-        continue
-
-    depth = 0
-    start = None
-    header = ""
-    body = []
-
-    for idx, raw in enumerate(lines, start=1):
-        line = strip_comment(raw).strip()
-
-        if start is None:
-            if not line:
-                continue
-
-            if "{" in line:
-                before = line.split("{", 1)[0].strip()
-
-                if before:
-                    start = idx
-                    header = before
-                    body = []
-                    depth = line.count("{") - line.count("}")
-
-                    if depth <= 0:
-                        records.append((path, start, idx, header, body))
-                        start = None
-                        header = ""
-                        body = []
-            continue
-
-        body.append(raw)
-
-        depth += line.count("{")
-        depth -= line.count("}")
-
-        if depth <= 0:
-            records.append((path, start, idx, header, body))
-            start = None
-            header = ""
-            body = []
-            depth = 0
-
-with open(out, "w", encoding="utf-8") as f:
-    for path, start, end, header, body in records:
-        f.write("FILE\t%s\n" % path)
-        f.write("START\t%d\n" % start)
-        f.write("END\t%d\n" % end)
-        f.write("HEADER\t%s\n" % header.replace("\t", " "))
-        f.write("BODY_BEGIN\n")
-        for line in body:
-            f.write(line.rstrip("\n") + "\n")
-        f.write("BODY_END\n")
-PY
-
-##############################################################################
-# 建立真实控制关系
-##############################################################################
-
-declare -A FOUND_CFG
-declare -A FOUND_START
-declare -A FOUND_END
-declare -A FOUND_HEADER
-declare -A FOUND_LIMIT
-
-current_file=""
-current_start=""
-current_end=""
-current_header=""
-body=""
-
-parse_record() {
-    local target="$1"
-
-    local header="$current_header"
-    local body_text="$body"
-
-    python3 - "$target" "$header" "$body_text" <<'PY'
-import sys
-import re
-import shlex
-
-target = sys.argv[1]
-header = sys.argv[2]
-body = sys.argv[3]
-
-def clean_token(x):
-    x = x.strip()
-    if len(x) >= 2 and x[0] == x[-1] and x[0] in "\"'":
-        x = x[1:-1]
-    return x
-
-try:
-    tokens = shlex.split(header, comments=False, posix=True)
-except Exception:
-    tokens = header.split()
-
-matches = []
-
-for token in tokens:
-    token = clean_token(token)
-
-    if token == target:
-        matches.append(token)
-        continue
-
-    if "*" in token or "?" in token or "[" in token:
-        import fnmatch
-        if fnmatch.fnmatch(target, token):
-            matches.append(token)
-
-if not matches:
-    sys.exit(1)
-
-limit = "UNSET"
-lines = body.splitlines()
-
-for line in lines:
-    s = line.strip()
-
-    if not s or s.startswith("#"):
-        continue
-
-    m = re.match(r'^(?:maxsize)\s+(\S+)', s, re.I)
-    if m:
-        limit = "maxsize " + m.group(1)
-        break
-
-    m = re.match(r'^(?:size)\s+(\S+)', s, re.I)
-    if m:
-        limit = "size " + m.group(1)
-        break
-
-print(limit)
-PY
-}
-
-declare -A CFG_FOR_LOG
-declare -A START_FOR_LOG
-declare -A END_FOR_LOG
-declare -A LIMIT_FOR_LOG
-
-while IFS= read -r line || [[ -n "$line" ]]; do
-    case "$line" in
-        FILE$'\t'*)
-            current_file="${line#FILE	}"
-            ;;
-        START$'\t'*)
-            current_start="${line#START	}"
-            ;;
-        END$'\t'*)
-            current_end="${line#END	}"
-            ;;
-        HEADER$'\t'*)
-            current_header="${line#HEADER	}"
-            ;;
-        BODY_BEGIN)
-            body=""
-            ;;
-        BODY_END)
-            for lf in "${LOG_FILES[@]}"; do
-                result="$(
-                    parse_record "$lf" 2>/dev/null || true
-                )"
-
-                if [[ -n "$result" ]]; then
-                    if [[ -z "${CFG_FOR_LOG[$lf]:-}" ]]; then
-                        CFG_FOR_LOG["$lf"]="$current_file"
-                        START_FOR_LOG["$lf"]="$current_start"
-                        END_FOR_LOG["$lf"]="$current_end"
-                        LIMIT_FOR_LOG["$lf"]="$result"
-                    fi
-                fi
-            done
-            ;;
-        *)
-            if [[ -n "$current_file" ]]; then
-                body+="$line"$'\n'
-            fi
-            ;;
-    esac
-done < "$TMP_DIR/stanzas"
-
-CONTROL_COUNT=0
-
-for lf in "${LOG_FILES[@]}"; do
-    if [[ -n "${CFG_FOR_LOG[$lf]:-}" ]]; then
-        CONTROL_COUNT=$((CONTROL_COUNT + 1))
-    fi
-done
-
-UNKNOWN_COUNT=$((LOG_COUNT - CONTROL_COUNT))
-
-echo "  已识别明确控制关系：${CONTROL_COUNT}"
-echo "  未找到控制关系    ：${UNKNOWN_COUNT}"
-echo
-
-##############################################################################
+# ------------------------------------------------------------
 # journald
-##############################################################################
+# ------------------------------------------------------------
 
-echo "[4/8] 检测 systemd-journald"
-echo
+section "[5/8] 检测 systemd-journald"
 
 PERSISTENT_JOURNAL=0
 RUNTIME_JOURNAL=0
 
-if find /var/log/journal -type f -name '*.journal' -print -quit 2>/dev/null | grep -q .; then
-    PERSISTENT_JOURNAL=1
+if [ -d /var/log/journal ]; then
+    PERSISTENT_JOURNAL=$(find /var/log/journal \
+        -type f \( -name '*.journal' -o -name '*.journal~' \) \
+        2>/dev/null | wc -l)
 fi
 
-if find /run/log/journal -type f -name '*.journal' -print -quit 2>/dev/null | grep -q .; then
-    RUNTIME_JOURNAL=1
+if [ -d /run/log/journal ]; then
+    RUNTIME_JOURNAL=$(find /run/log/journal \
+        -type f \( -name '*.journal' -o -name '*.journal~' \) \
+        2>/dev/null | wc -l)
 fi
 
-get_journal_value() {
-    local key="$1"
+echo "  persistent journal : $PERSISTENT_JOURNAL"
+echo "  runtime journal    : $RUNTIME_JOURNAL"
 
-    if [[ -f "$JOURNAL_CONF" ]]; then
-        awk -v k="$key" '
-            /^[[:space:]]*#/ {next}
-            $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
-                sub(/^[^=]*=[[:space:]]*/, "", $0)
-                print $0
-            }
-        ' "$JOURNAL_CONF" | tail -n1
-    fi
-}
+J_SYSTEM=""
+J_RUNTIME=""
 
-SYSTEM_JOURNAL_VALUE="$(get_journal_value SystemMaxFileSize)"
-RUNTIME_JOURNAL_VALUE="$(get_journal_value RuntimeMaxFileSize)"
+if [ -f "$JOURNALD_CONF" ]; then
 
-echo "  persistent journal : ${PERSISTENT_JOURNAL}"
-echo "  runtime journal    : ${RUNTIME_JOURNAL}"
-echo "  SystemMaxFileSize  : ${SYSTEM_JOURNAL_VALUE:-未设置}"
-echo "  RuntimeMaxFileSize : ${RUNTIME_JOURNAL_VALUE:-未设置}"
-echo
+    J_SYSTEM=$(
+        sed 's/[[:space:]]*#.*$//' "$JOURNALD_CONF" |
+        awk '
+        $1 ~ /^SystemMaxFileSize=/ {
+            sub(/^SystemMaxFileSize=/,"",$1)
+            print $1
+            exit
+        }
+        '
+    )
 
-##############################################################################
-# 所有日志表
-##############################################################################
+    J_RUNTIME=$(
+        sed 's/[[:space:]]*#.*$//' "$JOURNALD_CONF" |
+        awk '
+        $1 ~ /^RuntimeMaxFileSize=/ {
+            sub(/^RuntimeMaxFileSize=/,"",$1)
+            print $1
+            exit
+        }
+        '
+    )
 
-echo "[5/8] 所有日志及控制关系"
-echo
+    echo "  配置文件          : $JOURNALD_CONF"
+    echo "  SystemMaxFileSize  : ${J_SYSTEM:-未设置}"
+    echo "  RuntimeMaxFileSize : ${J_RUNTIME:-未设置}"
 
-printf "%-48s %-21s %-10s %-34s %-14s %-8s\n" \
+else
+
+    echo "  配置文件          : 不存在"
+    echo "  SystemMaxFileSize  : 跳过"
+    echo "  RuntimeMaxFileSize : 跳过"
+fi
+
+# ------------------------------------------------------------
+# 所有日志关系表
+# ------------------------------------------------------------
+
+section "[6/8] 所有日志及控制关系"
+
+printf "%-42s %-20s %-10s %-34s %-10s %-8s\n" \
     "日志" "类型" "大小" "真实控制文件" "当前限制" "建议"
 
-echo "---------------------------------------------------------------------------------------------------------------"
+printf '%*s\n' 130 '' | tr ' ' '-'
 
-for lf in "${LOG_FILES[@]}"; do
-    type="$(classify_log "$lf")"
-    size_bytes="$(stat -c '%s' "$lf" 2>/dev/null || echo 0)"
-    size="$(human_size "$size_bytes")"
-    cfg="${CFG_FOR_LOG[$lf]:-未找到}"
-    limit="${LIMIT_FOR_LOG[$lf]:-未设置}"
-    suggestion="$(recommend_log "$type")"
+while IFS=$'\t' read -r \
+    log type size controller start end pattern current rec; do
 
-    LOG_TYPES+=("$type")
-    LOG_SIZES+=("$size")
-    LOG_CONFIGS+=("$cfg")
-    LOG_LIMITS+=("$limit")
-    LOG_SUGGESTIONS+=("$suggestion")
+    [ -n "$log" ] || continue
 
-    printf "%-48s %-21s %-10s %-34s %-14s %-8s\n" \
-        "$lf" "$type" "$size" "$cfg" "$limit" "$suggestion"
-done
+    printf "%-42s %-20s %-10s %-34s %-10s %-8s\n" \
+        "$log" \
+        "$type" \
+        "$size" \
+        "$controller" \
+        "$current" \
+        "${rec:-跳过}"
 
-echo
+done < "$RESULTS"
 
-##############################################################################
-# 生成修改计划
-##############################################################################
+# ------------------------------------------------------------
+# 建立最终修改计划
+#
+# 重要：
+#   当前 maxsize 已存在时：
+#       - 如果已经 <= 建议值 → 不修改
+#       - 如果 > 建议值 → 修改
+#   未设置 → 添加
+#
+# maxsize 只是轮转触发条件，不是硬性截断。
+# ------------------------------------------------------------
 
-echo "[6/8] 修改建议"
-echo
-echo "建议依据：日志用途，不依据当前文件大小。"
-echo
+: > "$PLAN"
 
-for i in "${!LOG_FILES[@]}"; do
-    lf="${LOG_FILES[$i]}"
-    type="${LOG_TYPES[$i]}"
-    cfg="${LOG_CONFIGS[$i]}"
-    suggestion="${LOG_SUGGESTIONS[$i]}"
-    limit="${LOG_LIMITS[$i]}"
+needs_change() {
+    local current="$1"
+    local target="$2"
 
-    [[ "$suggestion" == "SKIP" ]] && continue
-    [[ "$cfg" == "未找到" ]] && continue
+    [ "$current" = "未设置" ] && return 0
 
-    if [[ "$limit" == "maxsize $suggestion" ]]; then
+    # 只处理 M / K / G 等常见单位
+    case "$current" in
+        *M)
+            cur="${current%M}"
+            ;;
+        *m)
+            cur="${current%m}"
+            ;;
+        *K|*k|*G|*g)
+            # 简单处理：存在不同单位时交给 awk
+            echo "$current $target" >/dev/null
+            return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    awk -v c="$cur" -v t="$target" '
+        BEGIN {
+            if ((c+0) > (t+0)) exit 0
+            exit 1
+        }
+    '
+}
+
+section "[7/8] 修改建议"
+
+PLAN_COUNT=0
+
+while IFS=$'\t' read -r \
+    log type size controller start end pattern current rec; do
+
+    [ -n "$log" ] || continue
+
+    [ "$rec" != "0" ] || continue
+    [ "$rec" != "跳过" ] || continue
+
+    if [ "$controller" = "未找到" ]; then
         continue
     fi
 
-    if [[ "$limit" == "size $suggestion" ]]; then
+    if [ "$controller" = "多个匹配" ]; then
         continue
     fi
 
-    MOD_LOG[$MOD_COUNT]="$lf"
-    MOD_CFG[$MOD_COUNT]="$cfg"
-    MOD_VALUE[$MOD_COUNT]="$suggestion"
-    MOD_STANZA_START[$MOD_COUNT]="${START_FOR_LOG[$lf]}"
-    MOD_STANZA_END[$MOD_COUNT]="${END_FOR_LOG[$lf]}"
+    if needs_change "$current" "$rec"; then
 
-    MOD_COUNT=$((MOD_COUNT + 1))
+        echo
+        echo "[$((PLAN_COUNT + 1))]"
+        echo "  日志       : $log"
+        echo "  类型       : $type"
+        echo "  控制文件   : $controller"
+        echo "  stanza     : $start-$end"
+        echo "  匹配规则   : $pattern"
+        echo "  当前限制   : $current"
+        echo "  修改目标   : maxsize ${rec}M"
 
-    echo "[$MOD_COUNT]"
-    echo "  日志       : $lf"
-    echo "  类型       : $type"
-    echo "  控制文件   : $cfg"
-    echo "  stanza     : ${START_FOR_LOG[$lf]}-${END_FOR_LOG[$lf]}"
-    echo "  当前限制   : ${limit}"
-    echo "  修改目标   : maxsize ${suggestion}"
-    echo
-done
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$log" \
+            "$type" \
+            "$controller" \
+            "$start" \
+            "$end" \
+            "$pattern" \
+            "$current" \
+            "$rec" \
+            "change" >> "$PLAN"
 
-##############################################################################
-# journald 修改计划
-##############################################################################
-
-if [[ -f "$JOURNAL_CONF" ]]; then
-    if [[ "$SYSTEM_JOURNAL_VALUE" != "$JOURNAL_MAX" ]]; then
-        JOURNAL_MOD=1
+        PLAN_COUNT=$((PLAN_COUNT + 1))
     fi
 
-    if [[ "$RUNTIME_JOURNAL_VALUE" != "$JOURNAL_MAX" ]]; then
-        JOURNAL_MOD=1
+done < "$RESULTS"
+
+# journald 是否修改
+J_PLAN=0
+
+if [ -f "$JOURNALD_CONF" ]; then
+
+    if [ -z "$J_SYSTEM" ]; then
+        J_PLAN=1
+    elif [ "$J_SYSTEM" != "8M" ] && [ "$J_SYSTEM" != "8m" ]; then
+        J_PLAN=1
+    fi
+
+    if [ -z "$J_RUNTIME" ]; then
+        J_PLAN=1
+    elif [ "$J_RUNTIME" != "8M" ] && [ "$J_RUNTIME" != "8m" ]; then
+        J_PLAN=1
     fi
 fi
 
-if (( MOD_COUNT == 0 && JOURNAL_MOD == 0 )); then
-    echo "没有需要修改的配置。"
+echo
+echo "------------------------------------------------------------"
+echo "修改计划"
+echo "------------------------------------------------------------"
+echo "  logrotate stanza : $PLAN_COUNT"
+
+if [ "$J_PLAN" -eq 1 ]; then
+    echo "  journald         : /etc/systemd/journald.conf → 8M"
+else
+    echo "  journald         : 无需修改"
+fi
+
+echo
+echo "跳过规则："
+echo "  ✓ 没有明确控制关系 → 跳过"
+echo "  ✓ 多个 stanza 同时匹配 → 跳过"
+echo "  ✓ 未知日志类型 → 跳过"
+echo "  ✓ 不创建配置文件"
+echo "  ✓ 不备份"
+echo "  ✓ 不删除日志"
+
+TOTAL_PLAN=$((PLAN_COUNT + J_PLAN))
+
+if [ "$TOTAL_PLAN" -eq 0 ]; then
     echo
-    echo "当前所有可确认控制关系均符合目标。"
+    echo "没有需要修改的配置。"
     exit 0
 fi
 
-if (( JOURNAL_MOD )); then
-    echo "[journald]"
-    echo "  控制文件 : $JOURNAL_CONF"
+# ------------------------------------------------------------
+# 确认
+# ------------------------------------------------------------
 
-    if [[ "$SYSTEM_JOURNAL_VALUE" == "$JOURNAL_MAX" ]]; then
-        echo "  SystemMaxFileSize  : 已是 $JOURNAL_MAX"
-    else
-        echo "  SystemMaxFileSize  : ${SYSTEM_JOURNAL_VALUE:-未设置} → $JOURNAL_MAX"
-    fi
-
-    if [[ "$RUNTIME_JOURNAL_VALUE" == "$JOURNAL_MAX" ]]; then
-        echo "  RuntimeMaxFileSize : 已是 $JOURNAL_MAX"
-    else
-        echo "  RuntimeMaxFileSize : ${RUNTIME_JOURNAL_VALUE:-未设置} → $JOURNAL_MAX"
-    fi
-
-    echo
-fi
-
-echo "[7/8] 修改原则"
 echo
-echo "  ✓ 只修改真实存在的控制配置"
-echo "  ✓ 只修改目标日志所属 stanza"
-echo "  ✓ 修改后重新解析同一 stanza"
-echo "  ✓ maxsize 按日志用途设置 1M–10M"
-echo "  ✓ journald 单文件限制 8M"
-echo "  ✓ 未确认控制关系的日志跳过"
-echo "  ✓ 不创建配置文件"
-echo "  ✓ 不备份"
-echo "  ✓ 不删除现有日志"
-echo
-
 echo "============================================================"
 echo "                         安全确认"
 echo "============================================================"
 echo
+echo "本次准备修改："
 
-echo "本次准备修改：${MOD_COUNT} 个 logrotate stanza"
+if [ "$PLAN_COUNT" -gt 0 ]; then
+    echo "  $PLAN_COUNT 个 logrotate stanza"
+fi
 
-if (( JOURNAL_MOD )); then
-    echo "journald：需要修改 $JOURNAL_CONF"
-else
-    echo "journald：无需修改"
+if [ "$J_PLAN" -eq 1 ]; then
+    echo "  journald：/etc/systemd/journald.conf"
 fi
 
 echo
-echo "⚠ 不创建任何配置文件"
+echo "⚠ 不创建配置文件"
 echo "⚠ 不备份"
 echo "⚠ 不删除现有日志"
+echo "⚠ 不执行 logrotate -f"
 echo
 
-read -r -p "确认执行精准修改？[y/N] " ANSWER
-echo
+printf "确认执行精准修改？[y/N] "
+read -r answer
 
-[[ "$ANSWER" =~ ^[Yy]$ ]] || {
-    echo "已取消，未修改任何配置。"
-    exit 0
-}
+case "$answer" in
+    y|Y|yes|YES)
+        ;;
+    *)
+        echo "已取消，没有修改任何配置。"
+        exit 0
+        ;;
+esac
 
-##############################################################################
+# ------------------------------------------------------------
 # 修改 logrotate
-##############################################################################
+# ------------------------------------------------------------
 
-echo "============================================================"
-echo "                         开始修改"
-echo "============================================================"
-echo
+section "开始修改"
 
-for ((i=0; i<MOD_COUNT; i++)); do
-    lf="${MOD_LOG[$i]}"
-    cfg="${MOD_CFG[$i]}"
-    value="${MOD_VALUE[$i]}"
-    start="${MOD_STANZA_START[$i]}"
-    end="${MOD_STANZA_END[$i]}"
+modify_stanza() {
+    local file="$1"
+    local start="$2"
+    local end="$3"
+    local target="$4"
 
-    python3 - "$cfg" "$lf" "$value" "$start" "$end" <<'PY'
-import sys
-import re
+    awk -v s="$start" -v e="$end" -v target="$target" '
+    NR == s {
+        in_stanza=1
+    }
 
-path = sys.argv[1]
-target = sys.argv[2]
-value = sys.argv[3]
-start = int(sys.argv[4])
-end = int(sys.argv[5])
+    in_stanza {
+        line=$0
 
-with open(path, "r", encoding="utf-8", errors="replace") as f:
-    lines = f.readlines()
+        # 如果已经有 maxsize，精准替换
+        stripped=line
+        sub(/^[[:space:]]+/, "", stripped)
 
-if start < 1 or end > len(lines) or start > end:
-    raise SystemExit("stanza 行范围无效")
+        if (stripped ~ /^maxsize[[:space:]]+/) {
+            indent=line
+            sub(/[^[:space:]].*$/, "", indent)
+            print indent "maxsize " target "M"
+            replaced=1
+            next
+        }
 
-header_index = start - 1
-brace_index = None
+        if (NR == e && line ~ /^[[:space:]]*}[[:space:]]*$/ && !replaced) {
+            print "    maxsize " target "M"
+        }
 
-for i in range(start - 1, end):
-    if "{" in lines[i]:
-        brace_index = i
-        break
+        print
 
-if brace_index is None:
-    raise SystemExit("找不到 stanza 起始 {")
+        if (NR == e) {
+            in_stanza=0
+        }
 
-# 再次确认 header 真正包含目标日志
-header = lines[header_index:brace_index + 1]
-header_text = "".join(header)
+        next
+    }
 
-if target not in header_text:
-    raise SystemExit("目标日志与 stanza 不匹配，拒绝修改")
+    {
+        print
+    }
+    ' "$file" > "$TMPROOT/modified"
 
-depth = 0
-close_index = None
-
-for i in range(brace_index, end):
-    depth += lines[i].count("{")
-    depth -= lines[i].count("}")
-
-    if depth == 0:
-        close_index = i
-        break
-
-if close_index is None:
-    raise SystemExit("找不到 stanza 结束 }")
-
-directive = f"maxsize {value}\n"
-
-# 只在当前 stanza 内寻找 size/maxsize
-found = None
-
-for i in range(brace_index + 1, close_index):
-    raw = lines[i]
-
-    if re.match(r'^\s*#\s*maxsize\s+\S+', raw, re.I):
-        found = ("commented", i)
-        break
-
-    if re.match(r'^\s*maxsize\s+\S+', raw, re.I):
-        found = ("maxsize", i)
-        break
-
-    if re.match(r'^\s*size\s+\S+', raw, re.I):
-        found = ("size", i)
-        break
-
-if found:
-    kind, idx = found
-
-    if kind == "size":
-        # 已经存在 size 时，不覆盖它。
-        # size 与 maxsize 语义不同，避免破坏原配置。
-        raise SystemExit("当前 stanza 已存在 size，拒绝强行改写")
-
-    indent = re.match(r'^(\s*)', lines[idx]).group(1)
-    lines[idx] = indent + directive
-
-else:
-    # 插入到 close brace 前
-    indent = "  "
-    lines.insert(close_index, indent + directive)
-
-with open(path, "w", encoding="utf-8") as f:
-    f.writelines(lines)
-PY
-
-    if [[ $? -eq 0 ]]; then
-        echo "✓ $cfg"
-        echo "  $lf → maxsize $value"
-    else
-        echo "✗ $cfg"
-        echo "  $lf → 修改失败"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-    fi
-done
-
-##############################################################################
-# 修改 journald
-##############################################################################
-
-if (( JOURNAL_MOD )); then
-    python3 - "$JOURNAL_CONF" "$JOURNAL_MAX" <<'PY'
-import sys
-import re
-
-path = sys.argv[1]
-value = sys.argv[2]
-
-with open(path, "r", encoding="utf-8", errors="replace") as f:
-    lines = f.readlines()
-
-keys = {
-    "SystemMaxFileSize": False,
-    "RuntimeMaxFileSize": False,
+    cat "$TMPROOT/modified" > "$file"
 }
 
-for i, raw in enumerate(lines):
-    m = re.match(
-        r'^(\s*)(#\s*)?(SystemMaxFileSize|RuntimeMaxFileSize)\s*=\s*(\S+)(\s*(?:#.*)?)$',
-        raw
+while IFS=$'\t' read -r \
+    log type controller start end pattern current target action; do
+
+    [ "$action" = "change" ] || continue
+
+    # 再次确认文件仍然存在
+    [ -f "$controller" ] || {
+        echo "✗ 控制文件消失：$controller"
+        continue
+    }
+
+    # 再次确认 stanza 中仍然存在目标 pattern
+    actual_pattern=$(
+        awk -v s="$start" -v e="$end" '
+        NR >= s && NR <= e {print}
+        ' "$controller" |
+        grep -F -- "$pattern" | head -n 1
     )
 
-    if not m:
+    if [ -z "$actual_pattern" ]; then
+        echo "✗ 二次验证失败，跳过：$log"
         continue
+    fi
 
-    indent = m.group(1)
-    commented = m.group(2)
+    modify_stanza "$controller" "$start" "$end" "$target"
 
-    key = m.group(3)
-    suffix = m.group(5) or ""
+    echo "✓ $controller"
+    echo "  $log → maxsize ${target}M"
 
-    lines[i] = f"{indent}{key}={value}{suffix}\n"
-    keys[key] = True
+done < "$PLAN"
 
-missing = [k for k, found in keys.items() if not found]
+# ------------------------------------------------------------
+# journald
+# ------------------------------------------------------------
 
-if missing:
-    section = None
+if [ "$J_PLAN" -eq 1 ]; then
 
-    for i, raw in enumerate(lines):
-        if raw.strip().lower() == "[journal]":
-            section = i
-            break
+    if [ -f "$JOURNALD_CONF" ]; then
 
-    if section is None:
-        raise SystemExit("[Journal] section 不存在，拒绝创建配置结构")
+        awk '
+        BEGIN {
+            sys=0
+            run=0
+        }
 
-    insert_at = len(lines)
+        /^[[:space:]]*#/ {
+            print
+            next
+        }
 
-    for i in range(section + 1, len(lines)):
-        if re.match(r'^\s*\[.*\]\s*$', lines[i]):
-            insert_at = i
-            break
+        /^[[:space:]]*SystemMaxFileSize[[:space:]]*=/ {
+            print "SystemMaxFileSize=8M"
+            sys=1
+            next
+        }
 
-    block = []
-    for key in missing:
-        block.append(f"{key}={value}\n")
+        /^[[:space:]]*RuntimeMaxFileSize[[:space:]]*=/ {
+            print "RuntimeMaxFileSize=8M"
+            run=1
+            next
+        }
 
-    lines[insert_at:insert_at] = block
+        {
+            print
+        }
 
-with open(path, "w", encoding="utf-8") as f:
-    f.writelines(lines)
-PY
+        END {
+            if (!sys)
+                print "SystemMaxFileSize=8M"
 
-    if [[ $? -eq 0 ]]; then
-        echo "✓ $JOURNAL_CONF"
-        echo "  SystemMaxFileSize=$JOURNAL_MAX"
-        echo "  RuntimeMaxFileSize=$JOURNAL_MAX"
-    else
-        echo "✗ $JOURNAL_CONF 修改失败"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+            if (!run)
+                print "RuntimeMaxFileSize=8M"
+        }
+        ' "$JOURNALD_CONF" > "$TMPROOT/journald.conf"
+
+        cat "$TMPROOT/journald.conf" > "$JOURNALD_CONF"
+
+        echo "✓ $JOURNALD_CONF"
+        echo "  SystemMaxFileSize=8M"
+        echo "  RuntimeMaxFileSize=8M"
     fi
 fi
 
-##############################################################################
-# logrotate 语法验证
-##############################################################################
+# ------------------------------------------------------------
+# 语法验证
+# ------------------------------------------------------------
+
+section "[8/8] 修改后验证"
 
 echo
 echo "============================================================"
@@ -887,156 +1014,200 @@ if logrotate -d "$LOGROTATE_MAIN" >/dev/null 2>&1; then
     echo "✓ logrotate 配置语法正常"
 else
     echo "✗ logrotate 配置语法检查失败"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
+    echo
+    logrotate -d "$LOGROTATE_MAIN" 2>&1 | tail -n 30
+    exit 1
 fi
 
-##############################################################################
-# 重新解析验证
-##############################################################################
+# ------------------------------------------------------------
+# 重新解析！
+#
+# 这里不读取之前的 RESULTS / PLAN。
+# 重新扫描配置文件，重新建立 stanza。
+# 这是修复上一版验证错误的关键。
+# ------------------------------------------------------------
+
+VERIFY_STANZAS="$TMPROOT/verify.stanzas"
+: > "$VERIFY_STANZAS"
+
+parse_verify_file() {
+    local file="$1"
+
+    [ -f "$file" ] || return 0
+
+    awk -v FILE="$file" '
+    function trim(s) {
+        sub(/^[[:space:]]+/, "", s)
+        sub(/[[:space:]]+$/, "", s)
+        return s
+    }
+
+    function flush(    i) {
+        if (start == 0)
+            return
+
+        for (i=1; i<=count; i++)
+            printf "%s\t%d\t%d\t%s\n",
+                FILE,start,end,paths[i]
+
+        delete paths
+        count=0
+        start=0
+        end=0
+    }
+
+    {
+        line=$0
+        sub(/[[:space:]]*#.*/, "", line)
+        line=trim(line)
+
+        if (line == "")
+            next
+
+        if (line ~ /^[^{}]+[[:space:]]*\{[[:space:]]*$/) {
+
+            flush()
+
+            start=NR
+
+            p=line
+            sub(/[[:space:]]*\{[[:space:]]*$/, "", p)
+            p=trim(p)
+
+            n=split(p,a,/[[:space:]]+/)
+            count=0
+
+            for(i=1;i<=n;i++)
+                if(a[i]!="")
+                    paths[++count]=a[i]
+
+            next
+        }
+
+        if(start>0)
+            end=NR
+
+        if(line=="}")
+            flush()
+    }
+
+    END {
+        flush()
+    }
+    ' "$file" >> "$VERIFY_STANZAS"
+}
+
+parse_verify_file "$LOGROTATE_MAIN"
+
+if [ -d "$LOGROTATE_DIR" ]; then
+    find "$LOGROTATE_DIR" -maxdepth 1 -type f -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+        parse_verify_file "$f"
+    done
+fi
 
 echo
 echo "============================================================"
-echo "              精确验证修改后的 logrotate stanza"
+echo "                       最终验证"
 echo "============================================================"
 
-for ((i=0; i<MOD_COUNT; i++)); do
-    lf="${MOD_LOG[$i]}"
-    cfg="${MOD_CFG[$i]}"
-    expected="${MOD_VALUE[$i]}"
-    start="${MOD_STANZA_START[$i]}"
-    end="${MOD_STANZA_END[$i]}"
+FAIL=0
 
-    result="$(
-        python3 - "$cfg" "$lf" "$expected" "$start" "$end" <<'PY'
-import sys
-import re
+while IFS=$'\t' read -r \
+    log type controller start end pattern current target action; do
 
-path = sys.argv[1]
-target = sys.argv[2]
-expected = sys.argv[3]
-start = int(sys.argv[4])
-end = int(sys.argv[5])
+    [ "$action" = "change" ] || continue
 
-with open(path, "r", encoding="utf-8", errors="replace") as f:
-    lines = f.readlines()
+    found=0
 
-if start < 1 or end > len(lines):
-    sys.exit(2)
+    while IFS=$'\t' read -r \
+        vf vs ve vp; do
 
-brace = None
-depth = 0
-close = None
+        [ "$vf" = "$controller" ] || continue
 
-for i in range(start - 1, end):
-    if brace is None and "{" in lines[i]:
-        brace = i
+        case "$log" in
+            $vp)
+                v="$(
+                    sed -n "${vs},${ve}p" "$vf" |
+                    sed 's/[[:space:]]*#.*$//' |
+                    awk '
+                    $1=="maxsize" {
+                        print $2
+                        exit
+                    }'
+                )"
 
-    if brace is not None:
-        depth += lines[i].count("{")
-        depth -= lines[i].count("}")
+                if [ "$v" = "${target}M" ] || \
+                   [ "$v" = "${target}m" ]; then
+                    echo "✓ $log : maxsize ${v}"
+                    found=1
+                fi
+                ;;
+        esac
 
-        if depth == 0:
-            close = i
-            break
+    done < "$VERIFY_STANZAS"
 
-if brace is None or close is None:
-    sys.exit(3)
-
-header = "".join(lines[start - 1:brace + 1])
-
-if target not in header:
-    sys.exit(4)
-
-found = []
-
-for i in range(brace + 1, close):
-    s = lines[i].strip()
-
-    if not s or s.startswith("#"):
-        continue
-
-    m = re.match(r'^maxsize\s+(\S+)', s, re.I)
-    if m:
-        found.append(m.group(1))
-
-if len(found) != 1:
-    print("INVALID")
-    sys.exit(5)
-
-if found[0].lower() != expected.lower():
-    print(found[0])
-    sys.exit(6)
-
-print("maxsize " + found[0])
-PY
-    )"
-
-    rc=$?
-
-    if [[ $rc -eq 0 ]]; then
-        echo "✓ $lf : $result"
-    else
-        if [[ "$result" == "INVALID" ]]; then
-            echo "✗ $lf : 当前 stanza 中 maxsize 不唯一或不存在"
-        elif [[ -n "$result" ]]; then
-            echo "✗ $lf : 期望 maxsize $expected，实际 $result"
-        else
-            echo "✗ $lf : 无法验证目标 stanza"
-        fi
-
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+    if [ "$found" -eq 0 ]; then
+        echo "✗ $log : 验证失败，期望 maxsize ${target}M"
+        FAIL=$((FAIL + 1))
     fi
-done
 
-##############################################################################
+done < "$PLAN"
+
+# ------------------------------------------------------------
 # journald 验证
-##############################################################################
+# ------------------------------------------------------------
 
-if (( JOURNAL_MOD )); then
-    echo
-    echo "============================================================"
-    echo "                    验证 journald"
-    echo "============================================================"
+if [ "$J_PLAN" -eq 1 ] && [ -f "$JOURNALD_CONF" ]; then
 
-    SYSTEM_AFTER="$(get_journal_value SystemMaxFileSize)"
-    RUNTIME_AFTER="$(get_journal_value RuntimeMaxFileSize)"
+    VSYS=$(
+        sed 's/[[:space:]]*#.*$//' "$JOURNALD_CONF" |
+        awk '
+        $1 ~ /^SystemMaxFileSize=/ {
+            sub(/^SystemMaxFileSize=/,"",$1)
+            print $1
+            exit
+        }'
+    )
 
-    if [[ "$SYSTEM_AFTER" == "$JOURNAL_MAX" ]]; then
-        echo "✓ SystemMaxFileSize = $SYSTEM_AFTER"
+    VRUN=$(
+        sed 's/[[:space:]]*#.*$//' "$JOURNALD_CONF" |
+        awk '
+        $1 ~ /^RuntimeMaxFileSize=/ {
+            sub(/^RuntimeMaxFileSize=/,"",$1)
+            print $1
+            exit
+        }'
+    )
+
+    if [ "$VSYS" = "8M" ] || [ "$VSYS" = "8m" ]; then
+        echo "✓ SystemMaxFileSize = $VSYS"
     else
-        echo "✗ SystemMaxFileSize = ${SYSTEM_AFTER:-未设置}"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "✗ SystemMaxFileSize = ${VSYS:-未设置}"
+        FAIL=$((FAIL + 1))
     fi
 
-    if [[ "$RUNTIME_AFTER" == "$JOURNAL_MAX" ]]; then
-        echo "✓ RuntimeMaxFileSize = $RUNTIME_AFTER"
+    if [ "$VRUN" = "8M" ] || [ "$VRUN" = "8m" ]; then
+        echo "✓ RuntimeMaxFileSize = $VRUN"
     else
-        echo "✗ RuntimeMaxFileSize = ${RUNTIME_AFTER:-未设置}"
-        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "✗ RuntimeMaxFileSize = ${VRUN:-未设置}"
+        FAIL=$((FAIL + 1))
     fi
 fi
 
-##############################################################################
-# 最终结果
-##############################################################################
-
 echo
-echo "============================================================"
-echo "                         最终结果"
-echo "============================================================"
+echo "------------------------------------------------------------"
 
-if (( FAIL_COUNT == 0 )); then
-    echo "✓ 所有修改均通过精确验证"
+if [ "$FAIL" -eq 0 ]; then
+    echo "✓ 所有本次修改项目均已通过重新解析验证"
+    echo "------------------------------------------------------------"
     echo
-    echo "配置修改完成。"
-    echo
-    echo "注意："
-    echo "  logrotate 的 maxsize 是轮转触发条件，不是文件系统级硬上限。"
-    echo "  journald 的 SystemMaxFileSize / RuntimeMaxFileSize 是单个 journal 文件限制。"
+    echo "完成。"
     exit 0
 else
-    echo "⚠ 验证失败：${FAIL_COUNT} 项"
+    echo "✗ 有 $FAIL 项验证失败"
+    echo "------------------------------------------------------------"
     echo
-    echo "请勿忽略上述失败项目。"
+    echo "配置已经修改，但验证未全部通过，请勿忽略。"
     exit 1
 fi
