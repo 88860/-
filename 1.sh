@@ -191,100 +191,33 @@ set_target_values() {
     local owner
     local group
 
-    tmp="$(mktemp "${TARGET}.tmp.XXXXXX")" ||
-        die "无法创建临时文件"
+    tmp="$(mktemp "${TARGET}.tmp.XXXXXX")" || die "无法创建临时文件"
 
     mode="$(stat -c '%a' "$TARGET" 2>/dev/null || echo 644)"
     owner="$(stat -c '%u' "$TARGET" 2>/dev/null || echo 0)"
     group="$(stat -c '%g' "$TARGET" 2>/dev/null || echo 0)"
 
-    awk \
-        -v k1="${TARGET_KEYS[0]}" \
-        -v v1="${TARGET_VALUES[0]}" \
-        -v k2="${TARGET_KEYS[1]}" \
-        -v v2="${TARGET_VALUES[1]}" \
-        -v k3="${TARGET_KEYS[2]}" \
-        -v v3="${TARGET_VALUES[2]}" \
-        -v k4="${TARGET_KEYS[3]}" \
-        -v v4="${TARGET_VALUES[3]}" '
-    function wanted(k,    r) {
-        if (k == k1) return v1
-        if (k == k2) return v2
-        if (k == k3) return v3
-        if (k == k4) return v4
-        return ""
-    }
+    # 完整拷贝原文件
+    cp -p "$TARGET" "$tmp"
 
-    function is_target(k) {
-        return (k == k1 || k == k2 || k == k3 || k == k4)
-    }
+    # 动态遍历所有目标参数，使用 sed 强力清洗旧参数及特殊符号
+    for ((i=0; i<${#TARGET_KEYS[@]}; i++)); do
+        local key="${TARGET_KEYS[$i]}"
+        local val="${TARGET_VALUES[$i]}"
 
-    {
-        original=$0
-        line=$0
+        sed -i -E "/^[[:space:]]*[#;-]*[[:space:]]*${key//./\.}[[:space:]]*=/d" "$tmp"
+        echo "$key = $val" >> "$tmp"
+    done
 
-        sub(/^[[:space:]]+/, "", line)
-
-        if (line == "") {
-            print original
-            next
-        }
-
-        active=1
-
-        if (line ~ /^#/ || line ~ /^;/)
-            active=0
-
-        check=line
-
-        if (!active)
-            sub(/^[#;][[:space:]]*/, "", check)
-
-        if (check ~ /=/) {
-            split(check,a,"=")
-            lhs=a[1]
-            gsub(/[[:space:]]/, "", lhs)
-
-            if (lhs ~ /^\//)
-                sub(/^\//, "", lhs)
-
-            if (is_target(lhs)) {
-                if (!seen[lhs]++) {
-                    print lhs " = " wanted(lhs)
-                }
-                next
-            }
-        }
-
-        print original
-    }
-
-    END {
-        if (!seen[k1]) print k1 " = " v1
-        if (!seen[k2]) print k2 " = " v2
-        if (!seen[k3]) print k3 " = " v3
-        if (!seen[k4]) print k4 " = " v4
-    }
-    ' "$TARGET" > "$tmp" || {
-        rm -f "$tmp"
-        die "生成配置文件失败"
-    }
-
-    chmod "$mode" "$tmp" || {
-        rm -f "$tmp"
-        die "设置文件权限失败"
-    }
-
-    chown "$owner:$group" "$tmp" 2>/dev/null || {
-        rm -f "$tmp"
-        die "设置文件属主失败"
-    }
+    chmod "$mode" "$tmp" || die "设置文件权限失败"
+    chown "$owner:$group" "$tmp" 2>/dev/null || true
 
     if ! mv -f "$tmp" "$TARGET"; then
         rm -f "$tmp"
         die "修改 $TARGET 失败"
     fi
 }
+
 
 show_source() {
     local key="$1"
