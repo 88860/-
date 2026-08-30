@@ -424,10 +424,32 @@ AVAILABLE_CC="$(get_sysctl net.ipv4.tcp_available_congestion_control)"
 QDISC="$(get_sysctl net.core.default_qdisc)"
 TFO="$(get_sysctl net.ipv4.tcp_fastopen)"
 
+BBR_SUPPORTED=0
+BBR_SOURCE="no"
+
+# 1. 检测当前可用算法中是否已包含 bbr (内核内置或已经挂载)
 if echo "$AVAILABLE_CC" | tr ' ' '\n' | grep -qx bbr; then
     BBR_SUPPORTED=1
+    BBR_SOURCE="yes (原生自带或已挂载)"
 else
-    BBR_SUPPORTED=0
+    # 2. 如果没有 bbr，尝试静默动态加载 tcp_bbr 模块
+    if command -v modprobe >/dev/null 2>&1 && modprobe tcp_bbr 2>/dev/null; then
+        AVAILABLE_CC="$(get_sysctl net.ipv4.tcp_available_congestion_control)"
+        
+        # 3. 再次校验，如果加载成功，说明是原版 Debian 的动态模块
+        if echo "$AVAILABLE_CC" | tr ' ' '\n' | grep -qx bbr; then
+            BBR_SUPPORTED=1
+            BBR_SOURCE="yes (动态挂载成功)"
+            
+            # 4. 精准修改系统原生文件 /etc/modules 实现持久化
+            if [ -w /etc/modules ]; then
+                if ! grep -q "^tcp_bbr$" /etc/modules 2>/dev/null; then
+                    echo "tcp_bbr" >> /etc/modules
+                    BBR_SOURCE="yes (动态挂载，并已追加至 /etc/modules 持久化)"
+                fi
+            fi
+        fi
+    fi
 fi
 
 if [ -r /proc/sys/net/core/default_qdisc ]; then
@@ -440,12 +462,8 @@ echo "  当前拥塞控制      : $CC"
 echo "  可用拥塞控制      : $AVAILABLE_CC"
 echo "  当前默认 qdisc    : $QDISC"
 echo "  当前 TCP Fast Open : $TFO"
+echo "  BBR 内核支持      : $BBR_SOURCE"
 
-if [ "$BBR_SUPPORTED" -eq 1 ]; then
-    echo "  BBR 内核支持      : yes"
-else
-    echo "  BBR 内核支持      : no"
-fi
 
 if [ "$FQ_SUPPORTED" -eq 1 ]; then
     echo "  FQ 配置接口       : yes"
@@ -767,7 +785,6 @@ echo "  ✓ tcp_mem / tcp_rmem / tcp_wmem"
 echo "  ✓ ECN"
 echo "  ✓ timestamps / SACK / window scaling"
 echo "  ✓ SSH 配置"
-echo "  ✓ modprobe"
 echo "  ✓ 不执行 sysctl -w"
 echo "  ✓ 不创建新的 sysctl.d 文件"
 echo "  ✓ 不备份"
