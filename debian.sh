@@ -44,8 +44,8 @@ install_kernel() {
     chmod 700 "$file"
     bash "$file"
     echo
-    echo "内核安装命令执行成功，5 秒后自动重启。"
-    sleep 5
+    echo "内核安装命令执行成功，3 秒后自动重启。"
+    sleep 3
     systemctl reboot
 }
 
@@ -112,10 +112,16 @@ dd_debian() {
     chmod +x "$reinstall_script"
 
     echo
+        echo
     echo "开始 DD Debian..."
     echo "============================================================"
 
     bash "$reinstall_script" debian
+
+    echo
+    echo "DD Debian 命令执行完成，3 秒后自动重启。"
+    sleep 3
+    systemctl reboot
 }
 
 show_menu() {
