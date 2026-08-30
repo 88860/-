@@ -77,18 +77,49 @@ run_all() {
 
 dd_debian() {
     echo "============================================================"
-    echo " 3. 一键 DD 为全新 Debian"
-    echo "============================================================"
-    echo "警告：此操作会重装系统并清除当前系统数据。"
+echo " 3. 一键 DD 为全新 Debian"
+echo "============================================================"
+echo "警告：此操作会重装系统并清除当前系统数据。"
+echo
+read -r -p "确认继续 DD？请输入 y/Y：" ans
+
+if [[ "$ans" =~ ^[Yy]$ ]]; then
     echo
-    read -r -p "确认继续 DD？请输入 YES：" ans
-    [[ "$ans" == "YES" ]] || { echo "已取消。"; return 0; }
+    echo "开始下载 reinstall.sh..."
 
-    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_    bash reinstall.sh debian
-}
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL -o reinstall.sh \
+            https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O reinstall.sh \
+            https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+    else
+        echo "错误：系统中没有 curl 或 wget。"
+        return 1
+    fi
 
-show_menu() {
-    clear 2>/dev/null || true
+    if [[ ! -s reinstall.sh ]]; then
+        echo "错误：reinstall.sh 下载失败。"
+        return 1
+    fi
+
+    echo
+    echo "开始 DD Debian..."
+    echo "============================================================"
+
+    bash reinstall.sh debian
+
+    echo
+    echo "============================================================"
+    echo "DD 命令执行结束，准备自动重启..."
+    echo "============================================================"
+
+    sleep 3
+    reboot
+else
+    echo "已取消。"
+    return 0
+fi
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
     echo "============================================================"
