@@ -83,21 +83,20 @@ dd_debian() {
 
     read -r -p "确认继续 DD？请输入 y 继续：" ans
 
-    [[ "$ans" == "y" || "$ans" == "Y" ]] || {
+    if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
         echo "已取消。"
         return 0
-    }
+    fi
 
     echo
     echo "正在下载 DD 重装脚本..."
     echo
 
     local DD_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-    local DD_SCRIPT="reinstall.sh"
+    local DD_SCRIPT="/tmp/reinstall.sh"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fL --connect-timeout 10 --retry 3 \
-            -o "$DD_SCRIPT" "$DD_URL"
+        curl -fL --retry 3 -o "$DD_SCRIPT" "$DD_URL"
     elif command -v wget >/dev/null 2>&1; then
         wget -O "$DD_SCRIPT" "$DD_URL"
     else
@@ -115,15 +114,15 @@ dd_debian() {
 
     echo
     echo "============================================================"
-    echo " DD 脚本下载完成，开始重装 Debian..."
-    echo " 系统将在 DD 完成后自动重启。"
+    echo " DD 脚本下载完成"
+    echo " 开始 DD Debian..."
     echo "============================================================"
     echo
 
     bash "$DD_SCRIPT" debian
 
     echo
-    echo "DD 脚本执行结束，准备重启系统..."
+    echo "DD 脚本执行结束，3 秒后重启..."
     sleep 3
 
     reboot
