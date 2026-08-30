@@ -52,13 +52,13 @@ install_kernel() {
 
 run_all() {
     echo "============================================================"
-    echo " 2. 按顺序执行：2 → 3 → 4 → 5 → 6 → 7"
+    echo " 2. 一键配置"
     echo "============================================================"
     echo "注意：2 会删除旧内核/元包；3 会删除 qemu*、os-prober、"
     echo "laptop-detect、pciutils、dmidecode 等软件及依赖。"
     echo "当前上传文件中没有找到独立的 7 文件，因此执行到 6 后停止。"
     echo
-    read -r -p "确认开始执行 2→3→4→5→6？[y/N] " ans
+    read -r -p "确认开始执行？[y/N] " ans
     case "$ans" in
         y|Y|yes|YES) ;;
         *) echo "已取消。"; return 0 ;;
@@ -74,7 +74,6 @@ run_all() {
     echo "============================================================"
     echo "2→6 已全部执行完成。"
     echo "============================================================"
-    echo "注意：你没有上传 7 文件，所以没有虚构或替代 7 的内容。"
 }
 
 dd_debian() {
@@ -83,21 +82,64 @@ dd_debian() {
     echo "============================================================"
     echo "警告：此操作会重装系统并清除当前系统数据。"
     echo
+
     read -r -p "确认继续 DD？请输入 YES：" ans
-    [[ "$ans" == "YES" ]] || { echo "已取消。"; return 0; }
+    [[ "$ans" == "YES" ]] || {
+        echo "已取消。"
+        return 0
+    }
 
-    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_    bash reinstall.sh debian
+    local reinstall="/root/reinstall.sh"
+    local url="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+
+    echo
+    echo "正在下载 reinstall.sh..."
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 3 -o "$reinstall" "$url" || {
+            echo "错误：下载 reinstall.sh 失败。"
+            return 1
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$reinstall" "$url" || {
+            echo "错误：下载 reinstall.sh 失败。"
+            return 1
+        }
+    else
+        echo "错误：系统没有 curl 或 wget。"
+        return 1
+    fi
+
+    [[ -s "$reinstall" ]] || {
+        echo "错误：reinstall.sh 下载失败或文件为空。"
+        return 1
+    }
+
+    chmod +x "$reinstall"
+
+    echo
+    echo "============================================================"
+    echo "开始执行：bash reinstall.sh debian"
+    echo "============================================================"
+    echo
+
+    bash "$reinstall" debian
+
+    echo
+    echo "============================================================"
+    echo "DD 脚本执行结束，系统即将重启..."
+    echo "============================================================"
+
+    sleep 3
+    reboot
 }
-
-show_menu() {
-    clear 2>/dev/null || true
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
     echo "============================================================"
-    echo "  1) 换内核（XanMod LTS）→ 成功后自动重启"
-    echo "  2) 按顺序执行 2 → 3 → 4 → 5 → 6 → 7"
-    echo "  3) 一键 DD 为全新 Debian"
-    echo "  0) 退出"
+    echo "  1. 换内核（XanMod LTS）→ 成功后自动重启"
+    echo "  2. 一键配置"
+    echo "  3. 一键 DD 为全新 Debian"
+    echo "  0. 退出"
     echo "============================================================"
 }
 
