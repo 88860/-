@@ -77,47 +77,47 @@ run_all() {
 
 dd_debian() {
     echo "============================================================"
-echo " 3. 一键 DD 为全新 Debian"
-echo "============================================================"
-echo "警告：此操作会重装系统并清除当前系统数据。"
-echo
-
-read -r -p "确认开始 DD？[y/N] " ans
-
-case "$ans" in
-    y|Y|yes|YES)
-        ;;
-    *)
-        echo "已取消。"
-        return 0
-        ;;
-esac
-
-if curl -fLO https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh \
-    || wget -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
-then
-    echo "reinstall.sh 下载成功。"
-else
-    echo "reinstall.sh 下载失败！"
-    return 1
-fi
-
-if bash reinstall.sh debian; then
+    echo " 3. 一键 DD 为全新 Debian"
+    echo "============================================================"
+    echo "警告：此操作会重装系统并清除当前系统数据。"
     echo
-    echo "============================================================"
-    echo " DD 流程已结束，5 秒后自动重启..."
-    echo "============================================================"
-    sync
-    sleep 5
-    reboot
-else
-    echo
-    echo "============================================================"
-    echo " DD 执行失败，不自动重启！"
-    echo "============================================================"
-    return 1
-fi
 
+    read -r -p "确认开始 DD？[y/N] " ans
+
+    case "$ans" in
+        y|Y|yes|YES)
+            ;;
+        *)
+            echo "已取消。"
+            return 0
+            ;;
+    esac
+
+    if curl -fLO https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh \
+        || wget -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+    then
+        echo "reinstall.sh 下载成功。"
+    else
+        echo "reinstall.sh 下载失败！"
+        return 1
+    fi
+
+    if bash reinstall.sh debian; then
+        echo
+        echo "============================================================"
+        echo " DD 流程已结束，5 秒后自动重启..."
+        echo "============================================================"
+        sync
+        sleep 5
+        reboot
+    else
+        echo
+        echo "============================================================"
+        echo " DD 执行失败，不自动重启！"
+        echo "============================================================"
+        return 1
+    fi
+}
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
     echo "============================================================"
