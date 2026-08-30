@@ -1,5 +1,5 @@
 #!/bin/bash
-# debian13自用 - Debian 13 自用一键菜单
+# debian13自用 - Debian 自用一键菜单
 # 1 = 安装 XanMod LTS 内核并自动重启
 # 2 = 一键配置
 # 3 = 一键 DD 全新 Debian
@@ -56,9 +56,8 @@ run_all() {
     echo "============================================================"
     echo "注意：2 会删除旧内核/元包；3 会删除 qemu*、os-prober、"
     echo "laptop-detect、pciutils、dmidecode 等软件及依赖。"
-    echo "当前上传文件中没有找到独立的 7 文件，因此执行到 6 后停止。"
-    echo
-    read -r -p "确认开始执行 2→3→4→5→6？[y/N] " ans
+    echo 
+    read -r -p "确认开始执行？[y/N] " ans
     case "$ans" in
         y|Y|yes|YES) ;;
         *) echo "已取消。"; return 0 ;;
@@ -78,29 +77,46 @@ run_all() {
 
 dd_debian() {
     echo "============================================================"
-    echo " 3. 一键 DD 为全新 Debian"
-    echo "============================================================"
-    echo "警告：此操作会重装系统并清除当前系统数据。"
-    echo
+echo " 3. 一键 DD 为全新 Debian"
+echo "============================================================"
+echo "警告：此操作会重装系统并清除当前系统数据。"
+echo
 
-    read -r -p "确认继续 DD？请输入 y：" ans
+read -r -p "确认开始 DD？[y/N] " ans
 
-    [[ "$ans" =~ ^[Yy]$ ]] || {
+case "$ans" in
+    y|Y|yes|YES)
+        ;;
+    *)
         echo "已取消。"
         return 0
-    }
+        ;;
+esac
 
-    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh \
-        || wget -O reinstall.sh \
-        https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+if curl -fLO https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh \
+    || wget -O reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+then
+    echo "reinstall.sh 下载成功。"
+else
+    echo "reinstall.sh 下载失败！"
+    return 1
+fi
 
-    bash reinstall.sh debian
-
-    exit 0
-}
-
-show_menu() {
-    clear 2>/dev/null || true
+if bash reinstall.sh debian; then
+    echo
+    echo "============================================================"
+    echo " DD 流程已结束，5 秒后自动重启..."
+    echo "============================================================"
+    sync
+    sleep 5
+    reboot
+else
+    echo
+    echo "============================================================"
+    echo " DD 执行失败，不自动重启！"
+    echo "============================================================"
+    return 1
+fi
 
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
