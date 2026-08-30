@@ -82,19 +82,31 @@ dd_debian() {
     echo "============================================================"
     echo "警告：此操作会重装系统并清除当前系统数据。"
     echo
-    read -r -p "确认继续 DD？请输入 YES：" ans
-    [[ "$ans" == "YES" ]] || { echo "已取消。"; return 0; }
 
-    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_    bash reinstall.sh debian
+    read -r -p "确认继续 DD？请输入 y：" ans
+
+    [[ "$ans" =~ ^[Yy]$ ]] || {
+        echo "已取消。"
+        return 0
+    }
+
+    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh \
+        || wget -O reinstall.sh \
+        https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh
+
+    bash reinstall.sh debian
+
+    exit 0
 }
 
 show_menu() {
     clear 2>/dev/null || true
+
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
     echo "============================================================"
     echo "  1) 换内核（XanMod LTS）→ 成功后自动重启"
-    echo "  2) 按顺序执行 2 → 3 → 4 → 5 → 6 → 7"
+    echo "  2) 一键配置"
     echo "  3) 一键 DD 为全新 Debian"
     echo "  0) 退出"
     echo "============================================================"
