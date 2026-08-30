@@ -1,7 +1,7 @@
 #!/bin/bash
 # debian13自用 - Debian 13 自用一键菜单
-# 1 = 安装 XanMod LTS 内核并自动重启
-# 2 = 按 2→3→4→5→6→7 顺序执行（当前仅提供 2~6，7 待补充）
+# 1 = 一键换XanMod LTS内核并自动重启
+# 2 = 一键配置
 # 3 = 一键 DD 全新 Debian
 set -Eeuo pipefail
 
@@ -30,11 +30,10 @@ run_b64() {
 
 install_kernel() {
     echo "============================================================"
-    echo " 1. 安装 XanMod LTS 内核"
+    echo " 1. 一键替换XanMod LTS内核"
     echo "============================================================"
-    echo "将执行你提供的 1换内核脚本；成功后自动重启。"
     echo
-    read -r -p "确认安装内核并自动重启？[y/N] " ans
+    read -r -p "确认替换内核并自动重启？[y/N] " ans
     case "$ans" in
         y|Y|yes|YES) ;;
         *) echo "已取消。"; return 0 ;;
@@ -45,20 +44,19 @@ install_kernel() {
     chmod 700 "$file"
     bash "$file"
     echo
-    echo "内核安装命令执行成功，5 秒后自动重启。"
+    echo "替换命令执行成功，5 秒后自动重启。"
     sleep 5
     systemctl reboot
 }
 
 run_all() {
     echo "============================================================"
-    echo " 2. 按顺序执行：2 → 3 → 4 → 5 → 6 → 7"
+    echo " 2. 一键配置"
     echo "============================================================"
     echo "注意：2 会删除旧内核/元包；3 会删除 qemu*、os-prober、"
     echo "laptop-detect、pciutils、dmidecode 等软件及依赖。"
-    echo "当前上传文件中没有找到独立的 7 文件，因此执行到 6 后停止。"
     echo
-    read -r -p "确认开始执行 2→3→4→5→6？[y/N] " ans
+    read -r -p "确认开始执行？[y/N] " ans
     case "$ans" in
         y|Y|yes|YES) ;;
         *) echo "已取消。"; return 0 ;;
@@ -72,9 +70,8 @@ run_all() {
 
     echo
     echo "============================================================"
-    echo "2→6 已全部执行完成。"
+    echo "已执行完成。"
     echo "============================================================"
-    echo "注意：你没有上传 7 文件，所以没有虚构或替代 7 的内容。"
 }
 
 dd_debian() {
@@ -83,19 +80,59 @@ dd_debian() {
     echo "============================================================"
     echo "警告：此操作会重装系统并清除当前系统数据。"
     echo
-    read -r -p "确认继续 DD？请输入 YES：" ans
-    [[ "$ans" == "YES" ]] || { echo "已取消。"; return 0; }
 
-    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_    bash reinstall.sh debian
+    read -r -p "确认继续 DD？请输入 y 继续：" ans
+
+    [[ "$ans" == "y" || "$ans" == "Y" ]] || {
+        echo "已取消。"
+        return 0
+    }
+
+    echo
+    echo "正在下载 DD 重装脚本..."
+    echo
+
+    local DD_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+    local DD_SCRIPT="reinstall.sh"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --connect-timeout 10 --retry 3 \
+            -o "$DD_SCRIPT" "$DD_URL"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$DD_SCRIPT" "$DD_URL"
+    else
+        echo "错误：系统中没有 curl 或 wget。"
+        return 1
+    fi
+
+    if [[ ! -s "$DD_SCRIPT" ]]; then
+        echo "错误：DD 脚本下载失败。"
+        rm -f "$DD_SCRIPT"
+        return 1
+    fi
+
+    chmod +x "$DD_SCRIPT"
+
+    echo
+    echo "============================================================"
+    echo " DD 脚本下载完成，开始重装 Debian..."
+    echo " 系统将在 DD 完成后自动重启。"
+    echo "============================================================"
+    echo
+
+    bash "$DD_SCRIPT" debian
+
+    echo
+    echo "DD 脚本执行结束，准备重启系统..."
+    sleep 3
+
+    reboot
 }
-
-show_menu() {
-    clear 2>/dev/null || true
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
     echo "============================================================"
-    echo "  1) 换内核（XanMod LTS）→ 成功后自动重启"
-    echo "  2) 按顺序执行 2 → 3 → 4 → 5 → 6 → 7"
+    echo "  1) 一键换XanMod LTS内核"
+    echo "  2) 一键配置"
     echo "  3) 一键 DD 为全新 Debian"
     echo "  0) 退出"
     echo "============================================================"
