@@ -80,55 +80,15 @@ dd_debian() {
     echo "============================================================"
     echo "警告：此操作会重装系统并清除当前系统数据。"
     echo
+    read -r -p "确认继续 DD？请输入 YES：" ans
+    [[ "$ans" == "YES" ]] || { echo "已取消。"; return 0; }
 
-    read -r -p "确认继续 DD？请输入 y 继续：" ans
-
-    if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
-        echo "已取消。"
-        return 0
-    fi
-
-    echo
-    echo "正在下载 DD 重装脚本..."
-    echo
-
-    local DD_URL="https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-    local DD_SCRIPT="/tmp/reinstall.sh"
-
-    if command -v curl >/dev/null 2>&1; then
-        curl -fL --retry 3 -o "$DD_SCRIPT" "$DD_URL"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -O "$DD_SCRIPT" "$DD_URL"
-    else
-        echo "错误：系统中没有 curl 或 wget。"
-        return 1
-    fi
-
-    if [[ ! -s "$DD_SCRIPT" ]]; then
-        echo "错误：DD 脚本下载失败。"
-        rm -f "$DD_SCRIPT"
-        return 1
-    fi
-
-    chmod +x "$DD_SCRIPT"
-
-    echo
-    echo "============================================================"
-    echo " DD 脚本下载完成"
-    echo " 开始 DD Debian..."
-    echo "============================================================"
-    echo
-
-    bash "$DD_SCRIPT" debian
-
-    echo
-    echo "DD 脚本执行结束，3 秒后重启..."
-    sleep 3
-
-    reboot
+    curl -O https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh || wget -O ${_##*/} $_    bash reinstall.sh debian
 }
+
 show_menu() {
     clear 2>/dev/null || true
+
 
     echo "============================================================"
     echo "                 $SCRIPT_NAME"
