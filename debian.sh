@@ -81,11 +81,11 @@ dd_debian() {
     echo "警告：此操作会重装系统并清除当前系统数据。"
     echo
 
-    read -r -p "确认继续 DD？请输入 YES：" ans
-    [[ "$ans" == "YES" ]] || {
-        echo "已取消。"
-        return 0
-    }
+    read -r -p "确认继续 DD？请输入 y：" ans
+[[ "$ans" =~ ^[Yy]$ ]] || {
+    echo "已取消。"
+    return 0
+}
 
     local reinstall_script="/tmp/reinstall.sh"
 
