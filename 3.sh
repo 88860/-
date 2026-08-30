@@ -1,27 +1,35 @@
 #!/bin/bash
-
 # ============================================================
-# Debian 13 Server Cleaner
-# 安全交互式深度清理
+# Debian 13 Server Safe Deep Cleaner
 # ============================================================
 
 set -u
+set -o pipefail
 
 [[ $EUID -eq 0 ]] || {
-    echo "请使用 root 运行"
+    echo "错误：请使用 root 运行"
     exit 1
 }
 
-KEEP_LOG_DAYS=14
+# ============================================================
+# 配置
+# ============================================================
+
+LOG_ROTATE_DAYS=14
 TMP_DAYS=7
 CACHE_DAYS=30
+BACKUP_DAYS=0
+BIG_LOG_MB=100
 
-TMP_LIST=$(mktemp)
-LOG_LIST=$(mktemp)
-BACKUP_LIST=$(mktemp)
-CACHE_LIST=$(mktemp)
+WORKDIR="$(mktemp -d /tmp/debian-clean.XXXXXX)"
+trap 'rm -rf "$WORKDIR"' EXIT
 
-trap 'rm -f "$TMP_LIST" "$LOG_LIST" "$BACKUP_LIST" "$CACHE_LIST"' EXIT
+LOG_LIST="$WORKDIR/logs"
+BACKUP_LIST="$WORKDIR/backups"
+TMP_LIST="$WORKDIR/tmp"
+CACHE_LIST="$WORKDIR/cache"
+
+touch "$LOG_LIST" "$BACKUP_LIST" "$TMP_LIST" "$CACHE_LIST"
 
 
 # ============================================================
@@ -29,33 +37,62 @@ trap 'rm -f "$TMP_LIST" "$LOG_LIST" "$BACKUP_LIST" "$CACHE_LIST"' EXIT
 # ============================================================
 
 human() {
-    numfmt --to=iec --suffix=B "$1" 2>/dev/null || echo "${1}B"
+    numfmt --to=iec --suffix=B "${1:-0}" 2>/dev/null || echo "${1:-0}B"
 }
 
-filesize() {
-    stat -c '%s' "$1" 2>/dev/null || echo 0
+size_of() {
+    stat -c '%s' -- "$1" 2>/dev/null || echo 0
+}
+
+count_list() {
+    awk 'END { print NR+0 }' "$1"
 }
 
 sum_list() {
-    local file="$1"
     local total=0
-    local size
+    local f s
 
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
-        size=$(filesize "$f")
-        total=$((total + size))
-    done < "$file"
+        s=$(size_of "$f")
+        total=$((total + s))
+    done < "$1"
 
     echo "$total"
 }
 
-count_list() {
-    grep -c . "$1" 2>/dev/null || echo 0
+free_bytes() {
+    df -B1 / 2>/dev/null | awk 'NR==2 {print $4+0}'
 }
 
-free_space() {
-    df -B1 / | awk 'NR==2 {print $4}'
+is_open() {
+    local f="$1"
+
+    command -v lsof >/dev/null 2>&1 || return 1
+
+    lsof -- "$f" >/dev/null 2>&1
+}
+
+add_find() {
+    local dir="$1"
+    shift
+
+    [[ -d "$dir" ]] || return
+
+    find "$dir" -xdev -type f "$@" -print 2>/dev/null
+}
+
+remove_file() {
+    local f="$1"
+
+    [[ -f "$f" ]] || return 0
+
+    if is_open "$f"; then
+        echo "  跳过正在使用：$f"
+        return 1
+    fi
+
+    rm -f -- "$f" 2>/dev/null
 }
 
 
@@ -67,10 +104,11 @@ clear
 
 echo
 echo "============================================================"
-echo "        Debian 13 服务器深度清理"
+echo "             Debian 13 服务器深度清理"
 echo "============================================================"
 echo
 echo "主机：$(hostname)"
+echo "系统：$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Debian}")"
 echo "内核：$(uname -r)"
 echo
 
@@ -83,58 +121,54 @@ echo
 
 
 # ============================================================
-# 1. 日志扫描
+# 1. 日志
 # ============================================================
 
-echo "[1/5] 扫描日志..."
+echo "[1/6] 扫描日志..."
 
-# 当前日志：
-# 只扫描 /var/log 普通日志文件
-find /var/log -xdev -type f \
+# 当前日志
+add_find /var/log \
     \( \
-    -name '*.log' \
-    -o -name 'syslog' \
-    -o -name 'auth.log' \
-    -o -name 'kern.log' \
-    -o -name 'daemon.log' \
-    -o -name 'messages' \
-    -o -name 'debug' \
-    -o -name 'mail.log' \
-    \) \
-    -print 2>/dev/null |
-sort -u > "$LOG_LIST"
+        -name '*.log' \
+        -o -name 'syslog' \
+        -o -name 'auth.log' \
+        -o -name 'kern.log' \
+        -o -name 'daemon.log' \
+        -o -name 'messages' \
+        -o -name 'mail.log' \
+        -o -name 'debug' \
+    \) >> "$LOG_LIST"
 
-# 已轮转日志也加入
-find /var/log -xdev -type f \
+# 轮转日志
+add_find /var/log \
+    -mtime +"$LOG_ROTATE_DAYS" \
     \( \
-    -name '*.gz' \
-    -o -name '*.xz' \
-    -o -name '*.bz2' \
-    -o -name '*.zst' \
-    -o -name '*.old' \
-    -o -name '*.1' \
-    -o -name '*.2' \
-    -o -name '*.3' \
-    -o -name '*.4' \
-    -o -name '*.5' \
-    -o -name '*.6' \
-    -o -name '*.7' \
-    -o -name '*.8' \
-    -o -name '*.9' \
-    \) \
-    -mtime +"$KEEP_LOG_DAYS" \
-    -print 2>/dev/null >> "$LOG_LIST"
+        -name '*.gz' \
+        -o -name '*.xz' \
+        -o -name '*.bz2' \
+        -o -name '*.zst' \
+        -o -name '*.old' \
+        -o -name '*.1' \
+        -o -name '*.2' \
+        -o -name '*.3' \
+        -o -name '*.4' \
+        -o -name '*.5' \
+        -o -name '*.6' \
+        -o -name '*.7' \
+        -o -name '*.8' \
+        -o -name '*.9' \
+    \) >> "$LOG_LIST"
 
 sort -u "$LOG_LIST" -o "$LOG_LIST"
 
 
 # ============================================================
-# 2. 备份扫描
+# 2. 备份
 # ============================================================
 
-echo "[2/5] 扫描备份..."
+echo "[2/6] 扫描备份..."
 
-for DIR in \
+for dir in \
     /backup \
     /backups \
     /var/backups \
@@ -144,10 +178,9 @@ for DIR in \
     /srv \
     /opt
 do
+    [[ -d "$dir" ]] || continue
 
-    [[ -d "$DIR" ]] || continue
-
-    find "$DIR" -xdev -type f \
+    find "$dir" -xdev -type f \
         \( \
         -iname '*.bak' \
         -o -iname '*.backup' \
@@ -159,7 +192,7 @@ do
         -o -iname '*.sql.gz' \
         -o -iname '*.sql.xz' \
         -o -iname '*.sql.bz2' \
-        -iname '*.dump' \
+        -o -iname '*.dump' \
         -o -iname '*.dump.gz' \
         -o -iname '*.tar' \
         -o -iname '*.tar.gz' \
@@ -172,7 +205,6 @@ do
         -o -iname '*backup*' \
         \) \
         -print 2>/dev/null >> "$BACKUP_LIST"
-
 done
 
 sort -u "$BACKUP_LIST" -o "$BACKUP_LIST"
@@ -182,45 +214,71 @@ sort -u "$BACKUP_LIST" -o "$BACKUP_LIST"
 # 3. 临时文件
 # ============================================================
 
-echo "[3/5] 扫描临时文件..."
+echo "[3/6] 扫描临时文件..."
 
-for DIR in /tmp /var/tmp; do
+for dir in /tmp /var/tmp; do
+    [[ -d "$dir" ]] || continue
 
-    [[ -d "$DIR" ]] || continue
-
-    find "$DIR" -xdev -type f \
-        -mtime +"$TMP_DAYS" \
-        -print 2>/dev/null >> "$TMP_LIST"
-
+    add_find "$dir" \
+        -mtime +"$TMP_DAYS" >> "$TMP_LIST"
 done
 
 sort -u "$TMP_LIST" -o "$TMP_LIST"
 
 
 # ============================================================
-# 4. 缓存
+# 4. 用户缓存
 # ============================================================
 
-echo "[4/5] 扫描用户缓存..."
+echo "[4/6] 扫描用户缓存..."
 
-for DIR in /root /home/*; do
+for dir in /root /home/*; do
+    [[ -d "$dir/.cache" ]] || continue
 
-    [[ -d "$DIR/.cache" ]] || continue
-
-    find "$DIR/.cache" -xdev -type f \
-        -mtime +"$CACHE_DAYS" \
-        -print 2>/dev/null >> "$CACHE_LIST"
-
+    add_find "$dir/.cache" \
+        -mtime +"$CACHE_DAYS" >> "$CACHE_LIST"
 done
 
 sort -u "$CACHE_LIST" -o "$CACHE_LIST"
 
 
 # ============================================================
-# 5. 统计
+# 5. Crash / Core
 # ============================================================
 
-echo "[5/5] 统计空间..."
+echo "[5/6] 扫描 Crash / Core..."
+
+CORE_LIST="$WORKDIR/core"
+touch "$CORE_LIST"
+
+for dir in \
+    /var/crash \
+    /var/lib/systemd/coredump \
+    /tmp \
+    /var/tmp \
+    /root \
+    /home
+do
+    [[ -d "$dir" ]] || continue
+
+    find "$dir" -xdev -type f \
+        \( \
+        -name 'core' \
+        -o -name 'core.*' \
+        -o -name '*.core' \
+        \) \
+        -mtime +"$TMP_DAYS" \
+        -print 2>/dev/null >> "$CORE_LIST"
+done
+
+sort -u "$CORE_LIST" -o "$CORE_LIST"
+
+
+# ============================================================
+# 6. 统计
+# ============================================================
+
+echo "[6/6] 统计空间..."
 echo
 
 
@@ -236,41 +294,52 @@ TMP_SIZE=$(sum_list "$TMP_LIST")
 CACHE_COUNT=$(count_list "$CACHE_LIST")
 CACHE_SIZE=$(sum_list "$CACHE_LIST")
 
+CORE_COUNT=$(count_list "$CORE_LIST")
+CORE_SIZE=$(sum_list "$CORE_LIST")
+
 
 # ============================================================
-# Docker
+# 当前大日志检查
 # ============================================================
 
-DOCKER_RECLAIM=0
+BIG_LOG_COUNT=0
+BIG_LOG_SIZE=0
 
-if command -v docker >/dev/null 2>&1; then
+while IFS= read -r f; do
+    [[ -f "$f" ]] || continue
 
-    DOCKER_INFO=$(docker system df 2>/dev/null || true)
+    s=$(size_of "$f")
 
-    echo "Docker 当前占用："
-    echo "$DOCKER_INFO"
-    echo
-
-    # Docker prune dry-run 不可靠，所以这里只显示 system df。
-    # 实际 prune 后通过 df 精确计算释放空间。
-
-fi
+    if (( s >= BIG_LOG_MB * 1024 * 1024 )); then
+        BIG_LOG_COUNT=$((BIG_LOG_COUNT + 1))
+        BIG_LOG_SIZE=$((BIG_LOG_SIZE + s))
+    fi
+done < "$LOG_LIST"
 
 
 # ============================================================
 # Journal
 # ============================================================
 
-JOURNAL_SIZE=0
+echo "Journal："
 
 if command -v journalctl >/dev/null 2>&1; then
+    journalctl --disk-usage 2>/dev/null || true
+else
+    echo "未安装 journalctl"
+fi
 
-    JOURNAL_TEXT=$(journalctl --disk-usage 2>/dev/null || true)
+echo
 
-    echo "Journal："
-    echo "$JOURNAL_TEXT"
+
+# ============================================================
+# Docker
+# ============================================================
+
+if command -v docker >/dev/null 2>&1; then
+    echo "Docker："
+    docker system df 2>/dev/null || true
     echo
-
 fi
 
 
@@ -278,129 +347,246 @@ fi
 # 扫描结果
 # ============================================================
 
-TOTAL=$((LOG_SIZE + BACKUP_SIZE + TMP_SIZE + CACHE_SIZE))
+TOTAL=$((LOG_SIZE + BACKUP_SIZE + TMP_SIZE + CACHE_SIZE + CORE_SIZE))
 
+echo
 echo "============================================================"
-echo "                    扫描结果"
+echo "                       扫描结果"
 echo "============================================================"
 echo
 
-printf "日志文件        : %8s 个   %10s\n" \
+printf "日志文件        : %8d 个   %12s\n" \
     "$LOG_COUNT" "$(human "$LOG_SIZE")"
 
-printf "备份文件        : %8s 个   %10s\n" \
+printf "备份文件        : %8d 个   %12s\n" \
     "$BACKUP_COUNT" "$(human "$BACKUP_SIZE")"
 
-printf "临时文件        : %8s 个   %10s\n" \
+printf "临时文件        : %8d 个   %12s\n" \
     "$TMP_COUNT" "$(human "$TMP_SIZE")"
 
-printf "用户缓存        : %8s 个   %10s\n" \
+printf "用户缓存        : %8d 个   %12s\n" \
     "$CACHE_COUNT" "$(human "$CACHE_SIZE")"
 
-echo
-echo "----------------------------------------------"
-printf "扫描到的文件    : %8s 个\n" \
-    "$((LOG_COUNT + BACKUP_COUNT + TMP_COUNT + CACHE_COUNT))"
+printf "Core/Crash       : %8d 个   %12s\n" \
+    "$CORE_COUNT" "$(human "$CORE_SIZE")"
 
-printf "文件预计可释放  : %10s\n" \
+echo
+echo "------------------------------------------------------------"
+
+printf "扫描文件总数    : %8d 个\n" \
+    "$((LOG_COUNT + BACKUP_COUNT + TMP_COUNT + CACHE_COUNT + CORE_COUNT))"
+
+printf "文件预计释放    : %12s\n" \
     "$(human "$TOTAL")"
 
-echo "----------------------------------------------"
-echo
+echo "------------------------------------------------------------"
+
+if (( BIG_LOG_COUNT > 0 )); then
+    echo
+    echo "发现超大当前日志："
+    printf "数量：%d 个，合计：%s\n" \
+        "$BIG_LOG_COUNT" "$(human "$BIG_LOG_SIZE")"
+fi
 
 
 # ============================================================
-# 日志详细情况
+# 最大日志
 # ============================================================
 
-if [[ "$LOG_COUNT" -gt 0 ]]; then
+if (( LOG_COUNT > 0 )); then
 
-    echo "日志占用最大的文件："
+    echo
+    echo "日志占用最大的 20 个："
+    echo "------------------------------------------------------------"
 
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
-        printf "%s %s\n" "$(filesize "$f")" "$f"
+        printf "%s\t%s\n" "$(size_of "$f")" "$f"
     done < "$LOG_LIST" |
     sort -nr |
     head -20 |
-    while read -r size file; do
-        printf "%10s  %s\n" "$(human "$size")" "$file"
+    while IFS=$'\t' read -r size f; do
+        printf "%12s  %s\n" "$(human "$size")" "$f"
     done
-
-    echo
 
 fi
 
 
 # ============================================================
-# 备份详细情况
+# 最大备份
 # ============================================================
 
-if [[ "$BACKUP_COUNT" -gt 0 ]]; then
+if (( BACKUP_COUNT > 0 )); then
 
-    echo "备份占用最大的文件："
+    echo
+    echo "备份占用最大的 20 个："
+    echo "------------------------------------------------------------"
 
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
-        printf "%s %s\n" "$(filesize "$f")" "$f"
+        printf "%s\t%s\n" "$(size_of "$f")" "$f"
     done < "$BACKUP_LIST" |
     sort -nr |
     head -20 |
-    while read -r size file; do
-        printf "%10s  %s\n" "$(human "$size")" "$file"
+    while IFS=$'\t' read -r size f; do
+        printf "%12s  %s\n" "$(human "$size")" "$f"
     done
 
-    echo
-
 fi
 
 
 # ============================================================
-# 确认
+# 确认菜单
 # ============================================================
 
+echo
 echo "============================================================"
-echo "                    清理确认"
+echo "                       清理菜单"
+echo "============================================================"
+echo
+echo "1) 清理全部"
+echo "2) 只清理日志"
+echo "3) 只清理备份"
+echo "4) 只清理缓存/临时文件"
+echo "5) 清理日志 + 备份"
+echo "6) 清理日志 + 缓存 + Docker"
+echo "0) 退出"
+echo
+
+read -rp "请选择 [0-6]： " CHOICE
+
+case "$CHOICE" in
+    1)
+        DO_LOG=1
+        DO_BACKUP=1
+        DO_TMP=1
+        DO_CACHE=1
+        DO_CORE=1
+        DO_APT=1
+        DO_JOURNAL=1
+        DO_DOCKER=1
+        ;;
+    2)
+        DO_LOG=1
+        DO_BACKUP=0
+        DO_TMP=0
+        DO_CACHE=0
+        DO_CORE=0
+        DO_APT=0
+        DO_JOURNAL=1
+        DO_DOCKER=0
+        ;;
+    3)
+        DO_LOG=0
+        DO_BACKUP=1
+        DO_TMP=0
+        DO_CACHE=0
+        DO_CORE=0
+        DO_APT=0
+        DO_JOURNAL=0
+        DO_DOCKER=0
+        ;;
+    4)
+        DO_LOG=0
+        DO_BACKUP=0
+        DO_TMP=1
+        DO_CACHE=1
+        DO_CORE=1
+        DO_APT=1
+        DO_JOURNAL=0
+        DO_DOCKER=0
+        ;;
+    5)
+        DO_LOG=1
+        DO_BACKUP=1
+        DO_TMP=0
+        DO_CACHE=0
+        DO_CORE=0
+        DO_APT=0
+        DO_JOURNAL=1
+        DO_DOCKER=0
+        ;;
+    6)
+        DO_LOG=1
+        DO_BACKUP=0
+        DO_TMP=1
+        DO_CACHE=1
+        DO_CORE=1
+        DO_APT=1
+        DO_JOURNAL=1
+        DO_DOCKER=1
+        ;;
+    0)
+        echo "已退出，没有删除任何文件。"
+        exit 0
+        ;;
+    *)
+        echo "无效选择。"
+        exit 1
+        ;;
+esac
+
+
+# ============================================================
+# 最终确认
+# ============================================================
+
+echo
+echo "============================================================"
+echo "                       最终确认"
 echo "============================================================"
 echo
 
-echo "准备清理："
-echo "  [1] 旧/当前日志"
-echo "  [2] 备份文件"
-echo "  [3] 临时文件"
-echo "  [4] 用户缓存"
-echo "  [5] APT 缓存"
-echo "  [6] Journal"
-echo "  [7] Docker 未使用资源"
-echo
+[[ "$DO_LOG" == 1 ]] && \
+    echo "✓ 日志"
 
+[[ "$DO_BACKUP" == 1 ]] && \
+    echo "✓ 备份"
+
+[[ "$DO_TMP" == 1 ]] && \
+    echo "✓ 临时文件"
+
+[[ "$DO_CACHE" == 1 ]] && \
+    echo "✓ 用户缓存"
+
+[[ "$DO_CORE" == 1 ]] && \
+    echo "✓ Core / Crash"
+
+[[ "$DO_APT" == 1 ]] && \
+    echo "✓ APT"
+
+[[ "$DO_JOURNAL" == 1 ]] && \
+    echo "✓ Journal"
+
+[[ "$DO_DOCKER" == 1 ]] && \
+    echo "✓ Docker 未使用资源"
+
+echo
 echo "保护："
-echo "  ✓ 不删除数据库数据目录"
-echo "  ✓ 不删除网站目录本身"
-echo "  ✓ 不删除当前运行内核"
-echo "  ✓ 不停止正在运行的 Docker 容器"
-echo "  ✓ 正在使用的日志不 rm，使用 truncate"
-echo "  ✓ 正在被进程打开的备份文件跳过"
+echo "✓ 数据库数据目录"
+echo "✓ 当前运行的 Docker 容器"
+echo "✓ /etc 系统配置"
+echo "✓ 当前运行内核"
+echo "✓ 正在被进程打开的文件"
 echo
 
-read -rp "确认开始清理？输入 YES： " CONFIRM
+read -rp "确定执行？输入 YES： " YES
 
-if [[ "$CONFIRM" != "YES" ]]; then
-    echo
-    echo "已取消，没有执行清理。"
+[[ "$YES" == "YES" ]] || {
+    echo "已取消。"
     exit 0
-fi
+}
 
 
 # ============================================================
 # 清理前空间
 # ============================================================
 
-BEFORE=$(free_space)
+BEFORE=$(free_bytes)
 
 echo
 echo "============================================================"
-echo "                    开始清理"
+echo "                       开始清理"
 echo "============================================================"
 echo
 
@@ -409,148 +595,176 @@ echo
 # 日志
 # ============================================================
 
-echo "[1] 清理日志..."
+if [[ "$DO_LOG" == 1 ]]; then
 
-# 当前日志：truncate，不删除
-while IFS= read -r f; do
+    echo "[1] 清理日志..."
 
-    [[ -f "$f" ]] || continue
+    while IFS= read -r f; do
 
-    # 判断是否正在使用
-    if command -v lsof >/dev/null 2>&1 &&
-       lsof "$f" >/dev/null 2>&1; then
+        [[ -f "$f" ]] || continue
 
-        echo "  清空正在使用的日志：$f"
-        truncate -s 0 "$f" 2>/dev/null || true
+        case "$f" in
 
-    fi
+            *.gz|*.xz|*.bz2|*.zst|*.old|*.1|*.2|*.3|*.4|*.5|*.6|*.7|*.8|*.9)
 
-done < "$LOG_LIST"
+                remove_file "$f" >/dev/null
 
+                ;;
 
-# 删除已经轮转的旧日志
-while IFS= read -r f; do
+            *.log|*/syslog|*/auth.log|*/kern.log|*/daemon.log|*/messages|*/mail.log|*/debug)
 
-    [[ -f "$f" ]] || continue
+                s=$(size_of "$f")
 
-    case "$f" in
-        *.gz|*.xz|*.bz2|*.zst|*.old|*.1|*.2|*.3|*.4|*.5|*.6|*.7|*.8|*.9)
+                # 当前日志只有超过阈值才清空
+                if (( s >= BIG_LOG_MB * 1024 * 1024 )); then
 
-            if ! command -v lsof >/dev/null 2>&1 ||
-               ! lsof "$f" >/dev/null 2>&1; then
+                    if is_open "$f"; then
+                        echo "  清空超大当前日志：$f"
+                        truncate -s 0 -- "$f" 2>/dev/null || true
+                    else
+                        # 不删除日志文件，只清空内容
+                        echo "  清空日志：$f"
+                        truncate -s 0 -- "$f" 2>/dev/null || true
+                    fi
+                fi
 
-                rm -f -- "$f" 2>/dev/null || true
+                ;;
 
-            else
+        esac
 
-                echo "  跳过正在使用：$f"
+    done < "$LOG_LIST"
 
-            fi
-
-            ;;
-
-    esac
-
-done < "$LOG_LIST"
+fi
 
 
 # ============================================================
 # 备份
 # ============================================================
 
-echo "[2] 清理备份..."
+if [[ "$DO_BACKUP" == 1 ]]; then
 
-while IFS= read -r f; do
+    echo "[2] 删除备份..."
 
-    [[ -f "$f" ]] || continue
+    while IFS= read -r f; do
 
-    if command -v lsof >/dev/null 2>&1 &&
-       lsof "$f" >/dev/null 2>&1; then
+        [[ -f "$f" ]] || continue
 
-        echo "  跳过正在使用：$f"
+        if is_open "$f"; then
 
-    else
+            echo "  跳过正在使用的备份：$f"
 
-        echo "  删除：$f"
-        rm -f -- "$f" 2>/dev/null || true
+        else
 
-    fi
+            echo "  删除：$f"
+            rm -f -- "$f" 2>/dev/null || true
 
-done < "$BACKUP_LIST"
+        fi
+
+    done < "$BACKUP_LIST"
+
+fi
 
 
 # ============================================================
-# 临时文件
+# 临时
 # ============================================================
 
-echo "[3] 清理临时文件..."
+if [[ "$DO_TMP" == 1 ]]; then
 
-while IFS= read -r f; do
+    echo "[3] 清理临时文件..."
 
-    [[ -f "$f" ]] || continue
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        remove_file "$f" >/dev/null || true
+    done < "$TMP_LIST"
 
-    if ! command -v lsof >/dev/null 2>&1 ||
-       ! lsof "$f" >/dev/null 2>&1; then
-
-        rm -f -- "$f" 2>/dev/null || true
-
-    fi
-
-done < "$TMP_LIST"
+fi
 
 
 # ============================================================
 # Cache
 # ============================================================
 
-echo "[4] 清理用户缓存..."
+if [[ "$DO_CACHE" == 1 ]]; then
 
-while IFS= read -r f; do
+    echo "[4] 清理用户缓存..."
 
-    [[ -f "$f" ]] || continue
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        remove_file "$f" >/dev/null || true
+    done < "$CACHE_LIST"
 
-    if ! command -v lsof >/dev/null 2>&1 ||
-       ! lsof "$f" >/dev/null 2>&1; then
+fi
 
-        rm -f -- "$f" 2>/dev/null || true
 
+# ============================================================
+# Core
+# ============================================================
+
+if [[ "$DO_CORE" == 1 ]]; then
+
+    echo "[5] 清理 Core / Crash..."
+
+    if command -v coredumpctl >/dev/null 2>&1; then
+        coredumpctl delete 2>/dev/null || true
     fi
 
-done < "$CACHE_LIST"
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        remove_file "$f" >/dev/null || true
+    done < "$CORE_LIST"
+
+fi
 
 
 # ============================================================
 # APT
 # ============================================================
 
-echo "[5] 清理 APT..."
+if [[ "$DO_APT" == 1 ]]; then
 
-apt-get autoremove -y
-apt-get autoclean -y
-apt-get clean
+    echo "[6] 清理 APT..."
+
+    apt-get autoremove -y
+    apt-get autoclean -y
+    apt-get clean
+
+fi
 
 
 # ============================================================
 # Journal
 # ============================================================
 
-echo "[6] 清理 Journal..."
+if [[ "$DO_JOURNAL" == 1 ]]; then
 
-journalctl --vacuum-time="${KEEP_LOG_DAYS}d"
-journalctl --vacuum-size=500M
+    echo "[7] 清理 Journal..."
+
+    journalctl --vacuum-time="${LOG_ROTATE_DAYS}d"
+    journalctl --vacuum-size=500M
+
+fi
 
 
 # ============================================================
 # Docker
 # ============================================================
 
-if command -v docker >/dev/null 2>&1; then
+if [[ "$DO_DOCKER" == 1 ]] &&
+   command -v docker >/dev/null 2>&1; then
 
-    echo "[7] 清理 Docker 未使用资源..."
+    echo "[8] 清理 Docker 未使用资源..."
 
+    # 不删除正在运行的容器
     docker container prune -f
+
+    # dangling image
     docker image prune -f
+
+    # unused network
     docker network prune -f
+
+    # build cache
     docker builder prune -f
 
 fi
@@ -560,22 +774,41 @@ fi
 # systemd tmpfiles
 # ============================================================
 
-echo "[8] 清理 systemd 临时文件..."
+echo "[9] systemd tmpfiles..."
 
 systemd-tmpfiles --clean 2>/dev/null || true
 
 
 # ============================================================
-# 最终统计
+# 旧内核
 # ============================================================
 
-AFTER=$(free_space)
+echo "[10] 检查旧内核..."
+
+CURRENT_KERNEL="$(uname -r)"
+
+echo "当前运行内核：$CURRENT_KERNEL"
+
+# 只交给 apt 判断，不手动删除 /boot
+apt-get autoremove --purge -y
+
+
+# ============================================================
+# 清理后空间
+# ============================================================
+
+AFTER=$(free_bytes)
 
 RELEASED=$((AFTER - BEFORE))
 
+
+# ============================================================
+# 最终报告
+# ============================================================
+
 echo
 echo "============================================================"
-echo "                    清理完成"
+echo "                       清理完成"
 echo "============================================================"
 echo
 
@@ -583,15 +816,14 @@ if (( RELEASED > 0 )); then
 
     echo "实际释放空间：$(human "$RELEASED")"
 
-elif (( RELEASED < 0 )); then
+elif (( RELEASED == 0 )); then
 
-    echo "磁盘空间变化：增加使用 $(
-        human "$((-RELEASED))"
-    )"
+    echo "实际释放空间：0B"
 
 else
 
-    echo "实际释放空间：0B"
+    echo "磁盘空间增加：$(human "$((-RELEASED)")"
+    echo "注意：清理期间可能有服务产生了新的文件。"
 
 fi
 
@@ -603,14 +835,13 @@ echo
 echo "Journal："
 journalctl --disk-usage 2>/dev/null || true
 
-echo
-
 if command -v docker >/dev/null 2>&1; then
+    echo
     echo "Docker："
     docker system df 2>/dev/null || true
-    echo
 fi
 
+echo
 echo "============================================================"
-echo "完成"
+echo "                    清理任务结束"
 echo "============================================================"
