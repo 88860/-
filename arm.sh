@@ -22,8 +22,8 @@ HEADERS_URL=$(curl -s "https://api.github.com/repos/CloudPassenger/Cloud-Kernel-
 WORKDIR=/tmp/cloud-kernel-install
 mkdir -p "$WORKDIR" && cd "$WORKDIR"
 
-wget -c "https://ghproxy.net/$IMAGE_URL"
-wget -c "https://ghproxy.net/$HEADERS_URL"
+curl -L -o linux-image.deb "https://ghproxy.net/$IMAGE_URL"
+curl -L -o linux-headers.deb "https://ghproxy.net/$HEADERS_URL"
 
 # 安装内核包
 apt install -y ./*.deb
