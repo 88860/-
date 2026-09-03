@@ -1,4 +1,6 @@
 #!/bin/bash
+# Kernel Cleanup Utility
+
 set -u
 export DEBIAN_FRONTEND=noninteractive
 
@@ -26,7 +28,6 @@ declare -a DEBIAN_META=()
 
 kernel_type() {
     local r="$1"
-
     if [[ "$r" =~ \+deb[0-9]+- ]]; then
         echo "debian"
     else
@@ -36,7 +37,6 @@ kernel_type() {
 
 kernel_base() {
     local r="$1"
-
     if [[ "$r" =~ ^[0-9]+(\.[0-9]+)* ]]; then
         echo "${BASH_REMATCH[0]}"
     else
@@ -51,10 +51,10 @@ is_installed() {
 kernel_image_pkgs() {
     local r="$1"
     local p
-
     for p in \
         "linux-image-$r" \
-        "linux-image-$r-unsigned"
+        "linux-image-$r-unsigned" \
+        "linux-headers-$r"
     do
         if is_installed "$p"; then
             echo "$p"
@@ -81,31 +81,23 @@ find_higher() {
         [[ "$r" == "$current" ]] && continue
 
         b="$(kernel_base "$r")"
-
         if [[ "$b" == "$current_base" ]]; then
             continue
         fi
-
         if [[ "$(printf '%s\n%s\n' "$current_base" "$b" | sort -V | tail -n1)" != "$b" ]]; then
             continue
         fi
-
-        if [[ -z "$higher" ||
-              "$(printf '%s\n%s\n' "$(kernel_base "$higher")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
+        if [[ -z "$higher" || "$(printf '%s\n%s\n' "$(kernel_base "$higher")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
             higher="$r"
         fi
     done <<< "$list"
-
     echo "$higher"
 }
 
 for d in /lib/modules/*; do
     [[ -d "$d" ]] || continue
-
     r="${d##*/}"
-
     ALL_KERNELS+=("$r")
-
     if [[ "$(kernel_type "$r")" == "debian" ]]; then
         DEBIAN_KERNELS+=("$r")
     else
@@ -113,23 +105,9 @@ for d in /lib/modules/*; do
     fi
 done
 
-mapfile -t ALL_KERNELS < <(
-    printf '%s\n' "${ALL_KERNELS[@]}" |
-    awk 'NF' |
-    sort -V -u
-)
-
-mapfile -t DEBIAN_KERNELS < <(
-    printf '%s\n' "${DEBIAN_KERNELS[@]}" |
-    awk 'NF' |
-    sort -V -u
-)
-
-mapfile -t THIRD_KERNELS < <(
-    printf '%s\n' "${THIRD_KERNELS[@]}" |
-    awk 'NF' |
-    sort -V -u
-)
+mapfile -t ALL_KERNELS < <(printf '%s\n' "${ALL_KERNELS[@]}" | awk 'NF' | sort -V -u)
+mapfile -t DEBIAN_KERNELS < <(printf '%s\n' "${DEBIAN_KERNELS[@]}" | awk 'NF' | sort -V -u)
+mapfile -t THIRD_KERNELS < <(printf '%s\n' "${THIRD_KERNELS[@]}" | awk 'NF' | sort -V -u)
 
 case "$ARCH" in
     amd64)
@@ -137,6 +115,7 @@ case "$ARCH" in
             linux-image-amd64
             linux-image-cloud-amd64
             linux-image-rt-amd64
+            linux-headers-amd64
         )
         ;;
     arm64)
@@ -144,6 +123,7 @@ case "$ARCH" in
             linux-image-arm64
             linux-image-cloud-arm64
             linux-image-rt-arm64
+            linux-headers-arm64
         )
         ;;
     *)
@@ -158,7 +138,6 @@ for p in "${META_LIST[@]}"; do
 done
 
 CURRENT_PACKAGED=0
-
 if is_packaged_kernel "$CURRENT"; then
     CURRENT_PACKAGED=1
 fi
@@ -166,26 +145,28 @@ fi
 CURRENT_TYPE="$(kernel_type "$CURRENT")"
 
 if [[ "$CURRENT_TYPE" == "debian" && "$CURRENT_PACKAGED" -eq 1 ]]; then
-
     HIGHER="$(find_higher "$CURRENT" "$(printf '%s\n' "${DEBIAN_KERNELS[@]}")")"
-
     if [[ -n "$HIGHER" ]]; then
-        echo "当前内核 : $CURRENT"
-        echo "发现更高 Debian 内核 : $HIGHER"
-        echo "请重启后重新运行脚本"
-        exit 0
+        echo "====================================================="
+        echo "警告：发现比当前运行内核版本更高的 Debian 内核！"
+        echo "当前运行内核 : $CURRENT"
+        echo "发现更高内核 : $HIGHER"
+        echo "如果您刚刚更新了内核且还未重启，请按 N 退出并重启。"
+        echo "====================================================="
+        read -r -p "是否仍要以当前内核为准，强制删除更高版本的内核？ [y/N] " FORCE_DEL
+        if [[ ! "$FORCE_DEL" =~ ^[Yy]$ ]]; then
+            echo "已取消操作。"
+            exit 0
+        fi
     fi
 
     for r in "${DEBIAN_KERNELS[@]}"; do
         [[ "$r" == "$CURRENT" ]] && continue
-
         while IFS= read -r p; do
             [[ -n "$p" ]] && CLEANUP+=("$p")
         done < <(kernel_image_pkgs "$r")
     done
-
 else
-
     if [[ "$CURRENT_PACKAGED" -eq 0 ]]; then
         CURRENT_MODE="自编译"
     else
@@ -193,17 +174,22 @@ else
     fi
 
     HIGHER="$(find_higher "$CURRENT" "$(printf '%s\n' "${THIRD_KERNELS[@]}")")"
-
     if [[ -n "$HIGHER" ]]; then
-        echo "当前内核 : $CURRENT"
-        echo "发现更高第三方内核 : $HIGHER"
-        echo "请重启后重新运行脚本"
-        exit 0
+        echo "====================================================="
+        echo "警告：发现比当前运行内核版本更高的第三方内核！"
+        echo "当前运行内核 : $CURRENT"
+        echo "发现更高内核 : $HIGHER"
+        echo "如果您刚刚更新了内核且还未重启，请按 N 退出并重启。"
+        echo "====================================================="
+        read -r -p "是否仍要以当前内核为准，强制删除更高版本的内核？ [y/N] " FORCE_DEL
+        if [[ ! "$FORCE_DEL" =~ ^[Yy]$ ]]; then
+            echo "已取消操作。"
+            exit 0
+        fi
     fi
 
     for r in "${THIRD_KERNELS[@]}"; do
         [[ "$r" == "$CURRENT" ]] && continue
-
         if is_packaged_kernel "$r"; then
             while IFS= read -r p; do
                 [[ -n "$p" ]] && CLEANUP+=("$p")
@@ -213,36 +199,29 @@ else
         fi
     done
 
-    if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ||
-          "${#DEBIAN_META[@]}" -gt 0 ]]; then
-
+    if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 || "${#DEBIAN_META[@]}" -gt 0 ]]; then
         echo "当前内核 : $CURRENT"
         echo "类型     : $CURRENT_MODE"
         echo
-
         if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ]]; then
             echo "Debian 内核:"
             printf '  %s\n' "${DEBIAN_KERNELS[@]}"
             echo
         fi
-
         if [[ "${#DEBIAN_META[@]}" -gt 0 ]]; then
             echo "Debian 元包:"
             printf '  %s\n' "${DEBIAN_META[@]}"
             echo
         fi
 
-        read -r -p "删除 Debian 内核和元包？ [y/N] " ANSWER
-
+        read -r -p "删除残留的 Debian 内核和元包？ [y/N] " ANSWER
         if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
             for r in "${DEBIAN_KERNELS[@]}"; do
                 [[ "$r" == "$CURRENT" ]] && continue
-
                 while IFS= read -r p; do
                     [[ -n "$p" ]] && CLEANUP+=("$p")
                 done < <(kernel_image_pkgs "$r")
             done
-
             CLEANUP+=("${DEBIAN_META[@]}")
         fi
     fi
@@ -253,7 +232,6 @@ declare -a UNIQUE_CLEANUP=()
 
 for p in "${CLEANUP[@]}"; do
     [[ -n "${SEEN[$p]+x}" ]] && continue
-
     SEEN["$p"]=1
     UNIQUE_CLEANUP+=("$p")
 done
@@ -261,12 +239,7 @@ done
 CLEANUP=("${UNIQUE_CLEANUP[@]}")
 
 if [[ "${#SKIP[@]}" -gt 0 ]]; then
-    mapfile -t SKIP < <(
-        printf '%s\n' "${SKIP[@]}" |
-        awk 'NF' |
-        sort -V -u
-    )
-
+    mapfile -t SKIP < <(printf '%s\n' "${SKIP[@]}" | awk 'NF' | sort -V -u)
     echo
     echo "未被软件包管理，跳过:"
     printf '  %s\n' "${SKIP[@]}"
@@ -279,30 +252,27 @@ if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
 fi
 
 for p in "${CLEANUP[@]}"; do
-    if [[ "$p" == "linux-image-$CURRENT" ||
-          "$p" == "linux-image-$CURRENT-unsigned" ]]; then
-        echo "检测到当前运行内核，停止"
+    if [[ "$p" == "linux-image-$CURRENT" || "$p" == "linux-image-$CURRENT-unsigned" || "$p" == "linux-headers-$CURRENT" ]]; then
+        echo "严重错误: 试图删除当前运行的内核包，操作中止！"
         exit 1
     fi
 done
 
 echo
-echo "将删除:"
+echo "将删除以下无用内核包:"
 printf '  %s\n' "${CLEANUP[@]}"
 echo
-echo "保留:"
+echo "保留当前内核:"
 echo "  $CURRENT"
 echo
 
-read -r -p "继续删除？ [y/N] " ANSWER
-
+read -r -p "确认继续删除？ [y/N] " ANSWER
 if [[ ! "$ANSWER" =~ ^[Yy]$ ]]; then
     echo "未执行任何操作"
     exit 0
 fi
 
 NOW="$(uname -r)"
-
 if [[ "$NOW" != "$CURRENT" ]]; then
     echo "运行内核发生变化"
     echo "未执行任何操作"
@@ -310,3 +280,24 @@ if [[ "$NOW" != "$CURRENT" ]]; then
 fi
 
 apt-get purge -y --no-install-recommends "${CLEANUP[@]}"
+
+echo -e "\n====================================================="
+echo "正在自动更新 GRUB 引导记录..."
+update-grub >/dev/null 2>&1 || echo "GRUB 更新失败，请手动检查。"
+
+GRUB_DEFAULT=$(grub-editenv /boot/grub/grubenv list 2>/dev/null | grep '^saved_entry=' | sed 's/^saved_entry=//')
+if [ -z "$GRUB_DEFAULT" ]; then
+    GRUB_DEFAULT=$(grep '^GRUB_DEFAULT=' /etc/default/grub 2>/dev/null | awk -F= '{print $2}' | sed "s/['\"]//g")
+fi
+
+echo -e "\n===================== 清理总结 ======================"
+echo "已成功删除以下内核包:"
+printf '   - %s\n' "${CLEANUP[@]}"
+echo "-----------------------------------------------------"
+echo "当前正在使用的内核 :"
+echo "   $CURRENT"
+echo "-----------------------------------------------------"
+echo "当前 GRUB 默认启动项配置 :"
+echo "   ${GRUB_DEFAULT:-0 (默认第一项)}"
+echo "====================================================="
+
