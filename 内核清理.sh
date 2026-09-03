@@ -4,6 +4,18 @@ set -u
 
 export DEBIAN_FRONTEND=noninteractive
 
+if [[ "$EUID" -ne 0 ]]; then
+    echo "请使用 root 运行"
+    exit 1
+fi
+
+for cmd in uname dpkg dpkg-query sort awk apt-get; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+        echo "缺少命令: $cmd"
+        exit 1
+    }
+done
+
 CURRENT="$(uname -r)"
 ARCH="$(dpkg --print-architecture)"
 
@@ -15,7 +27,7 @@ declare -a DEBIAN_META=()
 kernel_type() {
     local r="$1"
 
-    if [[ "$r" == *"+deb"*"-"* ]]; then
+    if [[ "$r" =~ \+deb[0-9]+- ]]; then
         echo "debian"
         return
     fi
@@ -31,38 +43,35 @@ kernel_type() {
 kernel_base() {
     local r="$1"
 
-    if [[ "$r" == *"+deb"* ]]; then
+    if [[ "$r" =~ \+deb[0-9]+- ]]; then
         echo "${r%%+*}"
         return
     fi
 
-    if [[ "$r" == *-xanmod* ]]; then
-        echo "${r%%-xanmod*}"
+    if [[ "$r" =~ ^[0-9]+(\.[0-9]+)*- ]]; then
+        echo "${r%%-*}"
         return
     fi
 
     echo "$r"
 }
 
-kernel_image_pkg() {
+is_installed() {
+    dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null | grep -qx installed
+}
+
+kernel_image_pkgs() {
     local r="$1"
     local p
 
     for p in \
         "linux-image-$r" \
-        "linux-image-unsigned-$r"
+        "linux-image-$r-unsigned"
     do
-        if dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null | grep -qx installed; then
+        if is_installed "$p"; then
             echo "$p"
-            return 0
         fi
     done
-
-    return 1
-}
-
-is_installed() {
-    dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null | grep -qx installed
 }
 
 CURRENT_TYPE="$(kernel_type "$CURRENT")"
@@ -77,6 +86,8 @@ for d in /lib/modules/*; do
     [[ -d "$d" ]] || continue
 
     r="${d##*/}"
+
+    kernel_image_pkgs "$r" >/dev/null || continue
 
     t="$(kernel_type "$r")"
 
@@ -102,8 +113,35 @@ mapfile -t THIRD_KERNELS < <(
     sort -V -u
 )
 
+case "$ARCH" in
+    amd64)
+        META_LIST=(
+            linux-image-amd64
+            linux-image-cloud-amd64
+            linux-image-rt-amd64
+        )
+        ;;
+    arm64)
+        META_LIST=(
+            linux-image-arm64
+            linux-image-cloud-arm64
+            linux-image-rt-arm64
+        )
+        ;;
+    *)
+        META_LIST=()
+        ;;
+esac
+
+for p in "${META_LIST[@]}"; do
+    if is_installed "$p"; then
+        DEBIAN_META+=("$p")
+    fi
+done
+
+CURRENT_BASE="$(kernel_base "$CURRENT")"
+
 if [[ "$CURRENT_TYPE" == "debian" ]]; then
-    CURRENT_BASE="$(kernel_base "$CURRENT")"
     HIGHER=""
 
     for r in "${DEBIAN_KERNELS[@]}"; do
@@ -113,7 +151,10 @@ if [[ "$CURRENT_TYPE" == "debian" ]]; then
 
         if [[ "$(printf '%s\n%s\n' "$CURRENT_BASE" "$b" | sort -V | tail -n1)" == "$b" &&
               "$b" != "$CURRENT_BASE" ]]; then
-            HIGHER="$r"
+            if [[ -z "$HIGHER" ||
+                  "$(printf '%s\n%s\n' "$(kernel_base "$HIGHER")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
+                HIGHER="$r"
+            fi
         fi
     done
 
@@ -127,9 +168,9 @@ if [[ "$CURRENT_TYPE" == "debian" ]]; then
     for r in "${DEBIAN_KERNELS[@]}"; do
         [[ "$r" == "$CURRENT" ]] && continue
 
-        p="$(kernel_image_pkg "$r" || true)"
-
-        [[ -n "$p" ]] && CLEANUP+=("$p")
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && CLEANUP+=("$p")
+        done < <(kernel_image_pkgs "$r")
     done
 
     if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
@@ -155,7 +196,6 @@ if [[ "$CURRENT_TYPE" == "debian" ]]; then
     fi
 
 else
-    CURRENT_BASE="$(kernel_base "$CURRENT")"
     HIGHER=""
 
     for r in "${THIRD_KERNELS[@]}"; do
@@ -165,7 +205,10 @@ else
 
         if [[ "$(printf '%s\n%s\n' "$CURRENT_BASE" "$b" | sort -V | tail -n1)" == "$b" &&
               "$b" != "$CURRENT_BASE" ]]; then
-            HIGHER="$r"
+            if [[ -z "$HIGHER" ||
+                  "$(printf '%s\n%s\n' "$(kernel_base "$HIGHER")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
+                HIGHER="$r"
+            fi
         fi
     done
 
@@ -179,51 +222,23 @@ else
     for r in "${THIRD_KERNELS[@]}"; do
         [[ "$r" == "$CURRENT" ]] && continue
 
-        p="$(kernel_image_pkg "$r" || true)"
-
-        [[ -n "$p" ]] && CLEANUP+=("$p")
+        while IFS= read -r p; do
+            [[ -n "$p" ]] && CLEANUP+=("$p")
+        done < <(kernel_image_pkgs "$r")
     done
 
-    case "$ARCH" in
-        amd64)
-            META_LIST=(
-                linux-image-amd64
-                linux-image-cloud-amd64
-                linux-image-rt-amd64
-            )
-            ;;
-        arm64)
-            META_LIST=(
-                linux-image-arm64
-                linux-image-cloud-arm64
-                linux-image-rt-arm64
-            )
-            ;;
-        *)
-            META_LIST=()
-            ;;
-    esac
+    if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ||
+          "${#DEBIAN_META[@]}" -gt 0 ]]; then
 
-    for p in "${META_LIST[@]}"; do
-        if is_installed "$p"; then
-            DEBIAN_META+=("$p")
-        fi
-    done
-
-    if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ]]; then
         echo "当前内核 : $CURRENT"
         echo "类型     : 第三方内核"
         echo
 
-        if [[ "${#THIRD_KERNELS[@]}" -gt 0 ]]; then
-            echo "第三方内核:"
-            printf '  %s\n' "${THIRD_KERNELS[@]}"
+        if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ]]; then
+            echo "Debian 内核:"
+            printf '  %s\n' "${DEBIAN_KERNELS[@]}"
             echo
         fi
-
-        echo "Debian 内核:"
-        printf '  %s\n' "${DEBIAN_KERNELS[@]}"
-        echo
 
         if [[ "${#DEBIAN_META[@]}" -gt 0 ]]; then
             echo "Debian 元包:"
@@ -235,25 +250,36 @@ else
 
         if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
             for r in "${DEBIAN_KERNELS[@]}"; do
-                p="$(kernel_image_pkg "$r" || true)"
+                [[ "$r" == "$CURRENT" ]] && continue
 
-                [[ -n "$p" ]] && CLEANUP+=("$p")
+                while IFS= read -r p; do
+                    [[ -n "$p" ]] && CLEANUP+=("$p")
+                done < <(kernel_image_pkgs "$r")
             done
 
             CLEANUP+=("${DEBIAN_META[@]}")
         fi
     fi
 
+    declare -A SEEN=()
+    declare -a UNIQUE_CLEANUP=()
+
+    for p in "${CLEANUP[@]}"; do
+        [[ -n "${SEEN[$p]+x}" ]] && continue
+        SEEN["$p"]=1
+        UNIQUE_CLEANUP+=("$p")
+    done
+
+    CLEANUP=("${UNIQUE_CLEANUP[@]}")
+
     if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
         echo "没有需要清理的内核"
         exit 0
     fi
 
-    CLEANUP=($(printf '%s\n' "${CLEANUP[@]}" | awk 'NF && !seen[$0]++'))
-
     for p in "${CLEANUP[@]}"; do
         if [[ "$p" == "linux-image-$CURRENT" ||
-              "$p" == "linux-image-unsigned-$CURRENT" ]]; then
+              "$p" == "linux-image-$CURRENT-unsigned" ]]; then
             echo "检测到当前运行内核，停止"
             exit 1
         fi
