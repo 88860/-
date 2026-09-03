@@ -1,7 +1,5 @@
 #!/bin/bash
-
 set -u
-
 export DEBIAN_FRONTEND=noninteractive
 
 if [[ "$EUID" -ne 0 ]]; then
@@ -19,9 +17,11 @@ done
 CURRENT="$(uname -r)"
 ARCH="$(dpkg --print-architecture)"
 
+declare -a ALL_KERNELS=()
 declare -a DEBIAN_KERNELS=()
 declare -a THIRD_KERNELS=()
 declare -a CLEANUP=()
+declare -a SKIP=()
 declare -a DEBIAN_META=()
 
 kernel_type() {
@@ -62,16 +62,49 @@ kernel_image_pkgs() {
     done
 }
 
-CURRENT_TYPE="$(kernel_type "$CURRENT")"
+is_packaged_kernel() {
+    kernel_image_pkgs "$1" | grep -q .
+}
+
+find_higher() {
+    local current="$1"
+    local list="$2"
+    local current_base
+    local r
+    local b
+    local higher=""
+
+    current_base="$(kernel_base "$current")"
+
+    while IFS= read -r r; do
+        [[ -z "$r" ]] && continue
+        [[ "$r" == "$current" ]] && continue
+
+        b="$(kernel_base "$r")"
+
+        if [[ "$b" == "$current_base" ]]; then
+            continue
+        fi
+
+        if [[ "$(printf '%s\n%s\n' "$current_base" "$b" | sort -V | tail -n1)" != "$b" ]]; then
+            continue
+        fi
+
+        if [[ -z "$higher" ||
+              "$(printf '%s\n%s\n' "$(kernel_base "$higher")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
+            higher="$r"
+        fi
+    done <<< "$list"
+
+    echo "$higher"
+}
 
 for d in /lib/modules/*; do
     [[ -d "$d" ]] || continue
 
     r="${d##*/}"
 
-    if ! kernel_image_pkgs "$r" | grep -q .; then
-        continue
-    fi
+    ALL_KERNELS+=("$r")
 
     if [[ "$(kernel_type "$r")" == "debian" ]]; then
         DEBIAN_KERNELS+=("$r")
@@ -79,6 +112,12 @@ for d in /lib/modules/*; do
         THIRD_KERNELS+=("$r")
     fi
 done
+
+mapfile -t ALL_KERNELS < <(
+    printf '%s\n' "${ALL_KERNELS[@]}" |
+    awk 'NF' |
+    sort -V -u
+)
 
 mapfile -t DEBIAN_KERNELS < <(
     printf '%s\n' "${DEBIAN_KERNELS[@]}" |
@@ -118,25 +157,17 @@ for p in "${META_LIST[@]}"; do
     fi
 done
 
-if [[ "$CURRENT_TYPE" == "debian" ]]; then
+CURRENT_PACKAGED=0
 
-    CURRENT_BASE="$(kernel_base "$CURRENT")"
-    HIGHER=""
+if is_packaged_kernel "$CURRENT"; then
+    CURRENT_PACKAGED=1
+fi
 
-    for r in "${DEBIAN_KERNELS[@]}"; do
-        [[ "$r" == "$CURRENT" ]] && continue
+CURRENT_TYPE="$(kernel_type "$CURRENT")"
 
-        b="$(kernel_base "$r")"
+if [[ "$CURRENT_TYPE" == "debian" && "$CURRENT_PACKAGED" -eq 1 ]]; then
 
-        if [[ "$b" != "$CURRENT_BASE" &&
-              "$(printf '%s\n%s\n' "$CURRENT_BASE" "$b" | sort -V | tail -n1)" == "$b" ]]; then
-
-            if [[ -z "$HIGHER" ||
-                  "$(printf '%s\n%s\n' "$(kernel_base "$HIGHER")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
-                HIGHER="$r"
-            fi
-        fi
-    done
+    HIGHER="$(find_higher "$CURRENT" "$(printf '%s\n' "${DEBIAN_KERNELS[@]}")")"
 
     if [[ -n "$HIGHER" ]]; then
         echo "当前内核 : $CURRENT"
@@ -155,23 +186,13 @@ if [[ "$CURRENT_TYPE" == "debian" ]]; then
 
 else
 
-    CURRENT_BASE="$(kernel_base "$CURRENT")"
-    HIGHER=""
+    if [[ "$CURRENT_PACKAGED" -eq 0 ]]; then
+        CURRENT_MODE="自编译"
+    else
+        CURRENT_MODE="第三方"
+    fi
 
-    for r in "${THIRD_KERNELS[@]}"; do
-        [[ "$r" == "$CURRENT" ]] && continue
-
-        b="$(kernel_base "$r")"
-
-        if [[ "$b" != "$CURRENT_BASE" &&
-              "$(printf '%s\n%s\n' "$CURRENT_BASE" "$b" | sort -V | tail -n1)" == "$b" ]]; then
-
-            if [[ -z "$HIGHER" ||
-                  "$(printf '%s\n%s\n' "$(kernel_base "$HIGHER")" "$b" | sort -V | tail -n1)" == "$b" ]]; then
-                HIGHER="$r"
-            fi
-        fi
-    done
+    HIGHER="$(find_higher "$CURRENT" "$(printf '%s\n' "${THIRD_KERNELS[@]}")")"
 
     if [[ -n "$HIGHER" ]]; then
         echo "当前内核 : $CURRENT"
@@ -183,16 +204,20 @@ else
     for r in "${THIRD_KERNELS[@]}"; do
         [[ "$r" == "$CURRENT" ]] && continue
 
-        while IFS= read -r p; do
-            [[ -n "$p" ]] && CLEANUP+=("$p")
-        done < <(kernel_image_pkgs "$r")
+        if is_packaged_kernel "$r"; then
+            while IFS= read -r p; do
+                [[ -n "$p" ]] && CLEANUP+=("$p")
+            done < <(kernel_image_pkgs "$r")
+        else
+            SKIP+=("$r")
+        fi
     done
 
     if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ||
           "${#DEBIAN_META[@]}" -gt 0 ]]; then
 
         echo "当前内核 : $CURRENT"
-        echo "类型     : 第三方内核"
+        echo "类型     : $CURRENT_MODE"
         echo
 
         if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ]]; then
@@ -235,7 +260,20 @@ done
 
 CLEANUP=("${UNIQUE_CLEANUP[@]}")
 
+if [[ "${#SKIP[@]}" -gt 0 ]]; then
+    mapfile -t SKIP < <(
+        printf '%s\n' "${SKIP[@]}" |
+        awk 'NF' |
+        sort -V -u
+    )
+
+    echo
+    echo "未被软件包管理，跳过:"
+    printf '  %s\n' "${SKIP[@]}"
+fi
+
 if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
+    echo
     echo "没有需要清理的内核"
     exit 0
 fi
