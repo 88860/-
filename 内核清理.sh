@@ -1,24 +1,47 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-VERSION="4.1.0"
+set -u
 
-if [[ $EUID -ne 0 ]]; then
-    echo "请使用 root 运行。"
-    exit 1
-fi
+export DEBIAN_FRONTEND=noninteractive
 
-for cmd in uname dpkg-query dpkg apt-get find sort awk grep sed mktemp; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-        echo "缺少命令: $cmd"
-        exit 1
-    }
-done
+CURRENT="$(uname -r)"
+ARCH="$(dpkg --print-architecture)"
 
-CURRENT_KERNEL=$(uname -r)
+declare -a DEBIAN_KERNELS=()
+declare -a THIRD_KERNELS=()
+declare -a CLEANUP=()
+declare -a DEBIAN_META=()
 
-is_installed() {
-    dpkg-query -W -f='${Status}' "$1" 2>/dev/null |
-        grep -qx 'install ok installed'
+kernel_type() {
+    local r="$1"
+
+    if [[ "$r" == *"+deb"*"-"* ]]; then
+        echo "debian"
+        return
+    fi
+
+    if [[ "$r" == *xanmod* ]]; then
+        echo "third"
+        return
+    fi
+
+    echo "unknown"
+}
+
+kernel_base() {
+    local r="$1"
+
+    if [[ "$r" == *"+deb"* ]]; then
+        echo "${r%%+*}"
+        return
+    fi
+
+    if [[ "$r" == *-xanmod* ]]; then
+        echo "${r%%-xanmod*}"
+        return
+    fi
+
+    echo "$r"
 }
 
 kernel_image_pkg() {
@@ -29,8 +52,8 @@ kernel_image_pkg() {
         "linux-image-$r" \
         "linux-image-unsigned-$r"
     do
-        if is_installed "$p"; then
-            printf '%s\n' "$p"
+        if dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null | grep -qx installed; then
+            echo "$p"
             return 0
         fi
     done
@@ -38,430 +61,231 @@ kernel_image_pkg() {
     return 1
 }
 
-pkg_version() {
-    dpkg-query -W -f='${Version}' "$1" 2>/dev/null
+is_installed() {
+    dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null | grep -qx installed
 }
 
-pkg_source() {
-    dpkg-query -W -f='${source:Package}' "$1" 2>/dev/null |
-        sed 's/:.*//'
-}
+CURRENT_TYPE="$(kernel_type "$CURRENT")"
 
-kernel_type() {
-    local release="$1"
-    local pkg="$2"
-    local source
+if [[ "$CURRENT_TYPE" == "unknown" ]]; then
+    echo "无法识别当前内核"
+    echo "$CURRENT"
+    exit 1
+fi
 
-    source=$(pkg_source "$pkg")
+for d in /lib/modules/*; do
+    [[ -d "$d" ]] || continue
 
-    if [[ "$release" == *"+deb"*"-"* ]]; then
-        echo "debian"
-        return 0
-    fi
+    r="${d##*/}"
 
-    if [[ "$source" == *xanmod* ||
-          "$pkg" == *xanmod* ||
-          "$release" == *xanmod* ]]; then
-        echo "third"
-        return 0
-    fi
+    t="$(kernel_type "$r")"
 
-    return 1
-}
-
-kernel_base() {
-    local release="$1"
-
-    case "$release" in
-        *+*)
-            printf '%s\n' "${release%%+*}"
+    case "$t" in
+        debian)
+            DEBIAN_KERNELS+=("$r")
             ;;
-        *-xanmod*)
-            printf '%s\n' "${release%%-xanmod*}"
-            ;;
-        *-x64v[0-9]*-xanmod*)
-            printf '%s\n' "${release%%-x64v[0-9]*-xanmod*}"
-            ;;
-        *)
-            printf '%s\n' "$release"
+        third)
+            THIRD_KERNELS+=("$r")
             ;;
     esac
-}
-
-release_newer() {
-    dpkg --compare-versions "$1" gt "$2"
-}
-
-debian_meta_packages() {
-    dpkg-query \
-        -W \
-        -f='${binary:Package}\t${Status}\n' \
-        'linux-image-*' 2>/dev/null |
-    awk -F '\t' '$2=="install ok installed"{print $1}' |
-    while IFS= read -r p; do
-        case "$p" in
-            linux-image-amd64)
-                echo "$p"
-                ;;
-            linux-image-arm64)
-                echo "$p"
-                ;;
-            linux-image-cloud-amd64)
-                echo "$p"
-                ;;
-            linux-image-cloud-arm64)
-                echo "$p"
-                ;;
-            linux-image-rt-amd64)
-                echo "$p"
-                ;;
-            linux-image-rt-arm64)
-                echo "$p"
-                ;;
-        esac
-    done
-}
-
-mapfile -t RELEASES < <(
-    find /lib/modules \
-        -mindepth 1 \
-        -maxdepth 1 \
-        -type d \
-        -printf '%f\n' 2>/dev/null |
-    sort -V
-)
-
-if [[ ${#RELEASES[@]} -eq 0 ]]; then
-    echo "未发现已安装的内核。"
-    exit 1
-fi
-
-CURRENT_PKG=$(kernel_image_pkg "$CURRENT_KERNEL" || true)
-
-if [[ -z "$CURRENT_PKG" ]]; then
-    echo
-    echo "无法确定当前运行内核对应的内核包。"
-    echo "为避免误删，本次停止。"
-    exit 1
-fi
-
-CURRENT_TYPE=$(kernel_type "$CURRENT_KERNEL" "$CURRENT_PKG" || true)
-
-if [[ -z "$CURRENT_TYPE" ]]; then
-    echo
-    echo "无法准确识别当前运行内核类型。"
-    echo "为避免误删，本次停止。"
-    exit 1
-fi
-
-CURRENT_BASE=$(kernel_base "$CURRENT_KERNEL")
-
-DEBIAN_RELEASES=()
-DEBIAN_PKGS=()
-
-THIRD_RELEASES=()
-THIRD_PKGS=()
-
-for release in "${RELEASES[@]}"; do
-    pkg=$(kernel_image_pkg "$release" || true)
-
-    [[ -z "$pkg" ]] && continue
-
-    type=$(kernel_type "$release" "$pkg" || true)
-
-    if [[ -z "$type" ]]; then
-        echo
-        echo "无法准确识别内核:"
-        echo "  $release"
-        echo
-        echo "为避免误删，本次停止。"
-        exit 1
-    fi
-
-    if [[ "$type" == "debian" ]]; then
-        DEBIAN_RELEASES+=("$release")
-        DEBIAN_PKGS+=("$pkg")
-    else
-        THIRD_RELEASES+=("$release")
-        THIRD_PKGS+=("$pkg")
-    fi
 done
 
-if [[ "$CURRENT_TYPE" == "debian" ]]; then
-
-    for release in "${DEBIAN_RELEASES[@]}"; do
-        [[ "$release" == "$CURRENT_KERNEL" ]] && continue
-
-        base=$(kernel_base "$release")
-
-        if release_newer "$base" "$CURRENT_BASE"; then
-            echo
-            echo "============================================================"
-            echo "需要重启"
-            echo "============================================================"
-            echo
-            echo "当前   : $CURRENT_KERNEL"
-            echo "新版本 : $release"
-            echo
-            echo "请先重启，进入新内核后再运行脚本。"
-            echo
-
-            read -r -p "现在重启？ [y/N] " answer
-
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                systemctl reboot
-            fi
-
-            exit 0
-        fi
-    done
-
-else
-
-    for release in "${THIRD_RELEASES[@]}"; do
-        [[ "$release" == "$CURRENT_KERNEL" ]] && continue
-
-        base=$(kernel_base "$release")
-
-        if release_newer "$base" "$CURRENT_BASE"; then
-            echo
-            echo "============================================================"
-            echo "需要重启"
-            echo "============================================================"
-            echo
-            echo "当前   : $CURRENT_KERNEL"
-            echo "新版本 : $release"
-            echo
-            echo "请先重启，进入新内核后再运行脚本。"
-            echo
-
-            read -r -p "现在重启？ [y/N] " answer
-
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                systemctl reboot
-            fi
-
-            exit 0
-        fi
-    done
-
-fi
-
-DEBIAN_META=()
-
-if [[ "$CURRENT_TYPE" == "third" ]]; then
-    mapfile -t DEBIAN_META < <(debian_meta_packages)
-fi
-
-CLEANUP=()
-
-if [[ "$CURRENT_TYPE" == "debian" ]]; then
-
-    for i in "${!DEBIAN_RELEASES[@]}"; do
-        release="${DEBIAN_RELEASES[$i]}"
-        pkg="${DEBIAN_PKGS[$i]}"
-
-        [[ "$release" == "$CURRENT_KERNEL" ]] && continue
-
-        base=$(kernel_base "$release")
-
-        if ! release_newer "$base" "$CURRENT_BASE"; then
-            CLEANUP+=("$pkg")
-        fi
-    done
-
-else
-
-    for i in "${!THIRD_RELEASES[@]}"; do
-        release="${THIRD_RELEASES[$i]}"
-        pkg="${THIRD_PKGS[$i]}"
-
-        [[ "$release" == "$CURRENT_KERNEL" ]] && continue
-
-        CLEANUP+=("$pkg")
-    done
-
-    for i in "${!DEBIAN_RELEASES[@]}"; do
-        release="${DEBIAN_RELEASES[$i]}"
-        pkg="${DEBIAN_PKGS[$i]}"
-
-        [[ "$release" == "$CURRENT_KERNEL" ]] && continue
-
-        CLEANUP+=("$pkg")
-    done
-
-fi
-
-mapfile -t CLEANUP < <(
-    printf '%s\n' "${CLEANUP[@]}" |
+mapfile -t DEBIAN_KERNELS < <(
+    printf '%s\n' "${DEBIAN_KERNELS[@]}" |
     awk 'NF' |
-    sort -u
+    sort -V -u
 )
 
-if [[ "$CURRENT_TYPE" == "third" ]]; then
+mapfile -t THIRD_KERNELS < <(
+    printf '%s\n' "${THIRD_KERNELS[@]}" |
+    awk 'NF' |
+    sort -V -u
+)
 
-    echo
-    echo "============================================================"
-    echo "内核清理"
-    echo "============================================================"
-    echo
-    echo "当前内核 : $CURRENT_KERNEL"
-    echo "类型     : 第三方内核"
-    echo
+if [[ "$CURRENT_TYPE" == "debian" ]]; then
+    CURRENT_BASE="$(kernel_base "$CURRENT")"
+    HIGHER=""
 
-    echo "Debian 内核:"
-    if [[ ${#DEBIAN_RELEASES[@]} -gt 0 ]]; then
-        printf '  %s\n' "${DEBIAN_RELEASES[@]}"
-    else
-        echo "  无"
-    fi
+    for r in "${DEBIAN_KERNELS[@]}"; do
+        [[ "$r" == "$CURRENT" ]] && continue
 
-    echo
-    echo "第三方内核:"
-    printf '  %s\n' "$CURRENT_KERNEL"
+        b="$(kernel_base "$r")"
 
-    for release in "${THIRD_RELEASES[@]}"; do
-        [[ "$release" == "$CURRENT_KERNEL" ]] && continue
-        printf '  %s\n' "$release"
+        if [[ "$(printf '%s\n%s\n' "$CURRENT_BASE" "$b" | sort -V | tail -n1)" == "$b" &&
+              "$b" != "$CURRENT_BASE" ]]; then
+            HIGHER="$r"
+        fi
     done
 
-    echo
-
-    if [[ ${#DEBIAN_META[@]} -gt 0 ]]; then
-        echo "Debian 元包:"
-        printf '  %s\n' "${DEBIAN_META[@]}"
-        echo
-        read -r -p "删除 Debian 内核和元包？ [y/N] " answer
-
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            CLEANUP+=("${DEBIAN_META[@]}")
-        fi
-    else
-        echo "Debian 元包:"
-        echo "  无"
-    fi
-
-    mapfile -t CLEANUP < <(
-        printf '%s\n' "${CLEANUP[@]}" |
-        awk 'NF' |
-        sort -u
-    )
-
-else
-
-    if [[ ${#CLEANUP[@]} -eq 0 ]]; then
-        echo
-        echo "无需清理。"
+    if [[ -n "$HIGHER" ]]; then
+        echo "当前内核 : $CURRENT"
+        echo "发现更高 Debian 内核 : $HIGHER"
+        echo "请重启后重新运行脚本"
         exit 0
     fi
 
-    echo
-    echo "============================================================"
-    echo "内核清理"
-    echo "============================================================"
-    echo
-    echo "当前内核 : $CURRENT_KERNEL"
+    for r in "${DEBIAN_KERNELS[@]}"; do
+        [[ "$r" == "$CURRENT" ]] && continue
+
+        p="$(kernel_image_pkg "$r" || true)"
+
+        [[ -n "$p" ]] && CLEANUP+=("$p")
+    done
+
+    if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
+        echo "没有需要清理的 Debian 内核"
+        exit 0
+    fi
+
+    echo "当前内核 : $CURRENT"
     echo "类型     : Debian 内核"
     echo
-
-    echo "Debian 内核:"
-    printf '  %s\n' "${DEBIAN_RELEASES[@]}"
-
+    echo "将删除:"
+    printf '  %s\n' "${CLEANUP[@]}"
     echo
-    echo "第三方内核:"
-    if [[ ${#THIRD_RELEASES[@]} -gt 0 ]]; then
-        printf '  %s\n' "${THIRD_RELEASES[@]}"
-    else
-        echo "  无"
+    echo "保留:"
+    echo "  $CURRENT"
+    echo
+
+    read -r -p "继续删除？ [y/N] " ANSWER
+
+    if [[ ! "$ANSWER" =~ ^[Yy]$ ]]; then
+        echo "未执行任何操作"
+        exit 0
     fi
 
-fi
+else
+    CURRENT_BASE="$(kernel_base "$CURRENT")"
+    HIGHER=""
 
-if [[ ${#CLEANUP[@]} -eq 0 ]]; then
-    echo
-    echo "无需清理。"
-    exit 0
-fi
+    for r in "${THIRD_KERNELS[@]}"; do
+        [[ "$r" == "$CURRENT" ]] && continue
 
-for pkg in "${CLEANUP[@]}"; do
-    if [[ "$pkg" == "$CURRENT_PKG" ]]; then
+        b="$(kernel_base "$r")"
+
+        if [[ "$(printf '%s\n%s\n' "$CURRENT_BASE" "$b" | sort -V | tail -n1)" == "$b" &&
+              "$b" != "$CURRENT_BASE" ]]; then
+            HIGHER="$r"
+        fi
+    done
+
+    if [[ -n "$HIGHER" ]]; then
+        echo "当前内核 : $CURRENT"
+        echo "发现更高第三方内核 : $HIGHER"
+        echo "请重启后重新运行脚本"
+        exit 0
+    fi
+
+    for r in "${THIRD_KERNELS[@]}"; do
+        [[ "$r" == "$CURRENT" ]] && continue
+
+        p="$(kernel_image_pkg "$r" || true)"
+
+        [[ -n "$p" ]] && CLEANUP+=("$p")
+    done
+
+    case "$ARCH" in
+        amd64)
+            META_LIST=(
+                linux-image-amd64
+                linux-image-cloud-amd64
+                linux-image-rt-amd64
+            )
+            ;;
+        arm64)
+            META_LIST=(
+                linux-image-arm64
+                linux-image-cloud-arm64
+                linux-image-rt-arm64
+            )
+            ;;
+        *)
+            META_LIST=()
+            ;;
+    esac
+
+    for p in "${META_LIST[@]}"; do
+        if is_installed "$p"; then
+            DEBIAN_META+=("$p")
+        fi
+    done
+
+    if [[ "${#DEBIAN_KERNELS[@]}" -gt 0 ]]; then
+        echo "当前内核 : $CURRENT"
+        echo "类型     : 第三方内核"
         echo
-        echo "安全检查失败："
-        echo "清理列表包含当前运行内核。"
-        echo "本次未执行任何操作。"
-        exit 1
+
+        if [[ "${#THIRD_KERNELS[@]}" -gt 0 ]]; then
+            echo "第三方内核:"
+            printf '  %s\n' "${THIRD_KERNELS[@]}"
+            echo
+        fi
+
+        echo "Debian 内核:"
+        printf '  %s\n' "${DEBIAN_KERNELS[@]}"
+        echo
+
+        if [[ "${#DEBIAN_META[@]}" -gt 0 ]]; then
+            echo "Debian 元包:"
+            printf '  %s\n' "${DEBIAN_META[@]}"
+            echo
+        fi
+
+        read -r -p "删除 Debian 内核和元包？ [y/N] " ANSWER
+
+        if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
+            for r in "${DEBIAN_KERNELS[@]}"; do
+                p="$(kernel_image_pkg "$r" || true)"
+
+                [[ -n "$p" ]] && CLEANUP+=("$p")
+            done
+
+            CLEANUP+=("${DEBIAN_META[@]}")
+        fi
     fi
-done
 
-echo
-echo "将删除:"
-printf '  %s\n' "${CLEANUP[@]}"
+    if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
+        echo "没有需要清理的内核"
+        exit 0
+    fi
 
-echo
-echo "保留:"
-echo "  $CURRENT_KERNEL"
+    CLEANUP=($(printf '%s\n' "${CLEANUP[@]}" | awk 'NF && !seen[$0]++'))
 
-echo
-echo "APT 安全检查..."
-
-SIMULATION=$(mktemp)
-
-trap 'rm -f "$SIMULATION"' EXIT
-
-if ! apt-get -s \
-    --no-install-recommends \
-    purge \
-    "${CLEANUP[@]}" >"$SIMULATION" 2>&1; then
+    for p in "${CLEANUP[@]}"; do
+        if [[ "$p" == "linux-image-$CURRENT" ||
+              "$p" == "linux-image-unsigned-$CURRENT" ]]; then
+            echo "检测到当前运行内核，停止"
+            exit 1
+        fi
+    done
 
     echo
-    echo "APT 安全检查失败"
+    echo "将删除:"
+    printf '  %s\n' "${CLEANUP[@]}"
     echo
-    echo "模拟 purge 未成功。"
-    echo "本次未执行任何操作。"
+    echo "保留:"
+    echo "  $CURRENT"
+    echo
+
+    read -r -p "继续删除？ [y/N] " ANSWER
+
+    if [[ ! "$ANSWER" =~ ^[Yy]$ ]]; then
+        echo "未执行任何操作"
+        exit 0
+    fi
+fi
+
+NOW="$(uname -r)"
+
+if [[ "$NOW" != "$CURRENT" ]]; then
+    echo "运行内核发生变化"
+    echo "未执行任何操作"
     exit 1
 fi
 
-if grep -Eiq \
-    'newly installed|to install|will be installed|upgraded|to be upgraded|will be upgraded|reinstalled|to be reinstalled|will be reinstalled|^Inst ' \
-    "$SIMULATION"; then
-
-    echo
-    echo "APT 安全检查失败"
-    echo
-    echo "检测到安装、升级或重新安装操作。"
-    echo "本次未执行任何操作。"
-    exit 1
-fi
-
-if ! grep -Eq \
-    '^(Remv|The following packages will be REMOVED:)' \
-    "$SIMULATION"; then
-
-    echo
-    echo "APT 安全检查失败"
-    echo
-    echo "模拟结果不是纯删除操作。"
-    echo "本次未执行任何操作。"
-    exit 1
-fi
-
-echo "安全检查通过：仅允许删除。"
-echo
-
-read -r -p "确认执行？ [y/N] " answer
-
-if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+if [[ "${#CLEANUP[@]}" -eq 0 ]]; then
+    echo "没有需要清理的内核"
     exit 0
 fi
 
-if [[ "$(uname -r)" != "$CURRENT_KERNEL" ]]; then
-    echo
-    echo "安全检查失败：运行内核已发生变化。"
-    echo "本次未执行任何操作。"
-    exit 1
-fi
-
-apt-get \
-    --no-install-recommends \
-    purge \
-    "${CLEANUP[@]}"
+apt-get purge -y --no-install-recommends "${CLEANUP[@]}"
