@@ -151,7 +151,6 @@ if [[ "$CURRENT_TYPE" == "debian" && "$CURRENT_PACKAGED" -eq 1 ]]; then
         echo "警告：发现比当前运行内核版本更高的 Debian 内核！"
         echo "当前运行内核 : $CURRENT"
         echo "发现更高内核 : $HIGHER"
-        echo "如果您刚刚更新了内核且还未重启，请按 N 退出并重启。"
         echo "====================================================="
         read -r -p "是否仍要以当前内核为准，强制删除更高版本的内核？ [y/N] " FORCE_DEL
         if [[ ! "$FORCE_DEL" =~ ^[Yy]$ ]]; then
@@ -167,19 +166,14 @@ if [[ "$CURRENT_TYPE" == "debian" && "$CURRENT_PACKAGED" -eq 1 ]]; then
         done < <(kernel_image_pkgs "$r")
     done
 else
-    if [[ "$CURRENT_PACKAGED" -eq 0 ]]; then
-        CURRENT_MODE="自编译"
-    else
-        CURRENT_MODE="第三方"
-    fi
-
+    CURRENT_MODE=$([[ "$CURRENT_PACKAGED" -eq 0 ]] && echo "自编译" || echo "第三方")
     HIGHER="$(find_higher "$CURRENT" "$(printf '%s\n' "${THIRD_KERNELS[@]}")")"
+    
     if [[ -n "$HIGHER" ]]; then
         echo "====================================================="
         echo "警告：发现比当前运行内核版本更高的第三方内核！"
         echo "当前运行内核 : $CURRENT"
         echo "发现更高内核 : $HIGHER"
-        echo "如果您刚刚更新了内核且还未重启，请按 N 退出并重启。"
         echo "====================================================="
         read -r -p "是否仍要以当前内核为准，强制删除更高版本的内核？ [y/N] " FORCE_DEL
         if [[ ! "$FORCE_DEL" =~ ^[Yy]$ ]]; then
@@ -226,6 +220,32 @@ else
         fi
     fi
 fi
+
+# ====================================================================
+# 深度扫描：检测其他残留的第三方包和元包（确保不遗漏纯元包或孤立头文件）
+# ====================================================================
+for pkg in $(dpkg-query -W -f='${Package}\n' 2>/dev/null | grep -E '^linux-'); do
+    # 1. 过滤系统基础包
+    if [[ "$pkg" =~ ^linux-(libc-dev|base|compiler|kbuild|doc|perf|source|tools) ]]; then
+        continue
+    fi
+    # 2. 过滤当前正在使用的内核包
+    if [[ "$pkg" == *"$CURRENT"* ]]; then
+        continue
+    fi
+    # 3. 依赖链检测：如果它是当前内核的元包，坚决保留
+    if dpkg-query -W -f='${Depends} ${Recommends}\n' "$pkg" 2>/dev/null | grep -q "$CURRENT"; then
+        continue
+    fi
+    # 4. 过滤已在清理列表中的包或官方白名单元包
+    if [[ " ${CLEANUP[*]} " == *" $pkg "* || " ${SKIP[*]} " == *" $pkg "* || " ${META_LIST[*]} " == *" $pkg "* ]]; then
+        continue
+    fi
+    # 5. 匹配第三方专属特征的包加入清理列表
+    if [[ "$pkg" =~ (xanmod|liquorix|bbr|zen|surface|joeyblog|mainline|custom) ]]; then
+        CLEANUP+=("$pkg")
+    fi
+done
 
 declare -A SEEN=()
 declare -a UNIQUE_CLEANUP=()
@@ -274,8 +294,7 @@ fi
 
 NOW="$(uname -r)"
 if [[ "$NOW" != "$CURRENT" ]]; then
-    echo "运行内核发生变化"
-    echo "未执行任何操作"
+    echo "运行内核发生变化，未执行任何操作"
     exit 1
 fi
 
@@ -300,4 +319,3 @@ echo "-----------------------------------------------------"
 echo "当前 GRUB 默认启动项配置 :"
 echo "   ${GRUB_DEFAULT:-0 (默认第一项)}"
 echo "====================================================="
-
