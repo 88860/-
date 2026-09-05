@@ -1,4 +1,3 @@
-cat << 'EOF' > /root/singbox.sh
 #!/usr/bin/env bash
 
 export LANG=en_US.UTF-8
@@ -15,9 +14,9 @@ CC="${CD}/client.json"
 CR="${CD}/certs"
 ND="${CD}/nodes"
 
-if [[ ! -f "/usr/bin/s" || $(readlink "/usr/bin/s") != "/root/singbox.sh" ]]; then
-    ln -sf /root/singbox.sh /usr/bin/s
-    chmod +x /root/singbox.sh
+if [[ ! -f "/usr/bin/s" || $(readlink "/usr/bin/s") != "/root/s.sh" ]]; then
+    ln -sf /root/s.sh /usr/bin/s
+    chmod +x /root/s.sh
 fi
 
 if [[ "$1" == "RenewTLS" ]]; then
@@ -102,8 +101,8 @@ ic() {
 
 it() {
     crontab -l > /tmp/bc.cron 2>/dev/null
-    sed -i '/singbox.sh RenewTLS/d' /tmp/bc.cron
-    echo "30 1 * * * /bin/bash /root/singbox.sh RenewTLS >> /root/ct.log 2>&1" >> /tmp/bc.cron
+    sed -i '/s.sh RenewTLS/d' /tmp/bc.cron
+    echo "30 1 * * * /bin/bash /root/s.sh RenewTLS >> /root/ct.log 2>&1" >> /tmp/bc.cron
     crontab /tmp/bc.cron
 }
 
@@ -382,9 +381,9 @@ ua() {
         rm -rf "$HOME/.acme.sh"
     fi
     crontab -l > /tmp/bc.cron 2>/dev/null
-    sed -i '/singbox.sh RenewTLS/d' /tmp/bc.cron
+    sed -i '/s.sh RenewTLS/d' /tmp/bc.cron
     crontab /tmp/bc.cron
-    rm -rf "$BP" "$CD" /usr/bin/s /root/singbox.sh
+    rm -rf "$BP" "$CD" /usr/bin/s /root/s.sh
     echo -e "${G}卸载完成，系统无残留${P}"
     exit 0
 }
@@ -413,5 +412,4 @@ m() {
 
 m
 EOF
-chmod +x /root/singbox.sh
 
