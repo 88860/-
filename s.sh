@@ -67,7 +67,7 @@ dc() {
     fi
 }
 
-in() {
+ins() {
     ck
     local c=$(dc)
     local v=$(curl -s -m 5 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
@@ -124,7 +124,7 @@ rn() {
 }
 
 ss() {
-    if [[ ! -f "$BP" ]]; then in; fi
+    if [[ ! -f "$BP" ]]; then ins; fi
     mkdir -p "$CD" "$CR" "$ND"
     echo -e "${B}=====================================${P}"
     echo "1. VLESS-Reality-Vision"
@@ -324,7 +324,7 @@ st() {
             echo -e "${G}已是最新版 ($cv)${P}"
         else
             echo -e "${Y}发现新版本 ($nv)，正在平滑更新...${P}"
-            in
+            ins
             systemctl is-active --quiet sing-box && systemctl restart sing-box
             systemctl is-active --quiet sing-box-client && systemctl restart sing-box-client
             echo -e "${G}更新完毕${P}"
@@ -411,5 +411,3 @@ m() {
 }
 
 m
-EOF
-
