@@ -146,7 +146,8 @@ u2j() {
     local rest=$(echo "$uri" | awk -F'://' '{print $2}' | awk -F'#' '{print $1}')
     
     if [[ "$proto" == "vmess" ]]; then
-        local vj=$(echo "$rest" | base64 -d 2>/dev/null)
+        local b64=$(echo "$rest" | tr '_-' '/+')
+        local vj=$(echo "$b64" | base64 -d 2>/dev/null)
         local add=$(echo "$vj" | jq -r .add)
         local port=$(echo "$vj" | jq -r .port)
         local id=$(echo "$vj" | jq -r .id)
@@ -165,7 +166,9 @@ u2j() {
     local host=$(echo "$host_port" | awk -F':' '{print $1}')
     local port=$(echo "$host_port" | awk -F':' '{print $2}')
 
-    get_param() { echo "$params" | tr '&' '\n' | grep "^$1=" | cut -d= -f2- ; }
+    get_param() { 
+        echo "$params" | tr '&' '\n' | grep "^$1=" | cut -d= -f2- | sed 's/%([0-9A-Fa-f]{2})/\\x\1/g' | xargs -I {} printf "%b" "{}" 2>/dev/null || echo ""
+    }
 
     if [[ "$proto" == "socks5" ]]; then
         local user=$(echo "$user_pass" | cut -d: -f1)
@@ -175,13 +178,13 @@ u2j() {
         local uuid=$(echo "$user_pass" | cut -d: -f1)
         local pass=$(echo "$user_pass" | cut -d: -f2)
         local sni=$(get_param "sni")
-        local alpn=$(get_param "alpn")
-        local cc=$(get_param "congestion_control")
+        local alpn=$(get_param "alpn"); [[ -z "$alpn" ]] && alpn="h3"
+        local cc=$(get_param "congestion_control"); [[ -z "$cc" ]] && cc="bbr"
         echo "{\"type\":\"tuic\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"uuid\":\"$uuid\",\"password\":\"$pass\",\"congestion_control\":\"$cc\",\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"alpn\":[\"$alpn\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
     elif [[ "$proto" == "hysteria2" ]]; then
         local pass="$user_pass"
         local sni=$(get_param "sni")
-        local alpn=$(get_param "alpn")
+        local alpn=$(get_param "alpn"); [[ -z "$alpn" ]] && alpn="h3"
         echo "{\"type\":\"hysteria2\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"password\":\"$pass\",\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"alpn\":[\"$alpn\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
     elif [[ "$proto" == "trojan" ]]; then
         local pass="$user_pass"
@@ -339,7 +342,7 @@ in_c() {
     fi
 
     if [[ "$uri" == vmess://* ]]; then
-        local vj=$(echo "${uri#vmess://}" | base64 -d 2>/dev/null | jq -c ".ps=\"$na\"")
+        local vj=$(echo "${uri#vmess://}" | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c ".ps=\"$na\"")
         uri="vmess://$(echo -n "$vj" | base64 -w 0)"
     else
         uri=$(echo "$uri" | awk -F'#' '{print $1}')
@@ -574,6 +577,6 @@ while true; do
         3) st ;;
         4) ua ;;
         0) exit 0 ;;
-        *) echo -e "${R}选错${P}"; sleep 1 ;;
+        *) echo -e "${R}选择无效${P}"; sleep 1 ;;
     esac
 done
