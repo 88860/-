@@ -405,6 +405,12 @@ in_c() {
 }
 
 ls_c() {
+    # 核心修复：客户端启用前检查并确保安装了 sing-box 内核
+    if [[ ! -f "$BP" ]]; then
+        echo -e "${Y}检测到本地未安装 sing-box 内核，正在自动安装...${P}"
+        ins
+    fi
+
     mkdir -p "$ND"
     local fs=("$ND"/*.uri)
     if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
@@ -577,7 +583,7 @@ st() {
         [[ -n "$pi4" ]] && echo -e "IPv4: ${G}$pi4${P} ($pgo)" || echo -e "IPv4: ${R}无${P}"
         [[ -n "$pi6" ]] && echo -e "IPv6: ${G}$pi6${P}" || echo -e "IPv6: ${R}无${P}"
     else 
-        echo -e "客户端状态: ${R}未运行 (当前网络为直连)${P}"
+        echo -e "客户端: ${R}未运行 (当前网络为直连)${P}"
     fi
 
     echo -e "\n${B}--- 证书续签状态 ---${P}"
