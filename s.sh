@@ -140,6 +140,80 @@ rn() {
     fi
 }
 
+u2j() {
+    local uri="$1"
+    local proto=$(echo "$uri" | awk -F'://' '{print $1}')
+    local rest=$(echo "$uri" | awk -F'://' '{print $2}' | awk -F'#' '{print $1}')
+    
+    if [[ "$proto" == "vmess" ]]; then
+        local vj=$(echo "$rest" | base64 -d 2>/dev/null)
+        local add=$(echo "$vj" | jq -r .add)
+        local port=$(echo "$vj" | jq -r .port)
+        local id=$(echo "$vj" | jq -r .id)
+        local net=$(echo "$vj" | jq -r .net)
+        local sni=$(echo "$vj" | jq -r .sni)
+        local path=$(echo "$vj" | jq -r .path)
+        echo "{\"type\":\"vmess\",\"tag\":\"proxy\",\"server\":\"$add\",\"server_port\":$port,\"uuid\":\"$id\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"$net\",\"path\":\"$path\"}}"
+        return
+    fi
+
+    local user_pass=$(echo "$rest" | grep -o '.*@' | sed 's/@$//')
+    local host_port_params=$(echo "$rest" | sed "s/^${user_pass}@//")
+    local host_port=$(echo "$host_port_params" | awk -F'?' '{print $1}')
+    local params=$(echo "$host_port_params" | awk -F'?' '{print $2}')
+    
+    local host=$(echo "$host_port" | awk -F':' '{print $1}')
+    local port=$(echo "$host_port" | awk -F':' '{print $2}')
+
+    get_param() { echo "$params" | tr '&' '\n' | grep "^$1=" | cut -d= -f2- ; }
+
+    if [[ "$proto" == "socks5" ]]; then
+        local user=$(echo "$user_pass" | cut -d: -f1)
+        local pass=$(echo "$user_pass" | cut -d: -f2)
+        echo "{\"type\":\"socks\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"username\":\"$user\",\"password\":\"$pass\"}"
+    elif [[ "$proto" == "tuic" ]]; then
+        local uuid=$(echo "$user_pass" | cut -d: -f1)
+        local pass=$(echo "$user_pass" | cut -d: -f2)
+        local sni=$(get_param "sni")
+        local alpn=$(get_param "alpn")
+        local cc=$(get_param "congestion_control")
+        echo "{\"type\":\"tuic\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"uuid\":\"$uuid\",\"password\":\"$pass\",\"congestion_control\":\"$cc\",\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"alpn\":[\"$alpn\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
+    elif [[ "$proto" == "hysteria2" ]]; then
+        local pass="$user_pass"
+        local sni=$(get_param "sni")
+        local alpn=$(get_param "alpn")
+        echo "{\"type\":\"hysteria2\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"password\":\"$pass\",\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"alpn\":[\"$alpn\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
+    elif [[ "$proto" == "trojan" ]]; then
+        local pass="$user_pass"
+        local sni=$(get_param "sni")
+        echo "{\"type\":\"trojan\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"password\":\"$pass\",\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
+    elif [[ "$proto" == "vless" ]]; then
+        local uuid="$user_pass"
+        local sni=$(get_param "sni")
+        local flow=$(get_param "flow")
+        local sec=$(get_param "security")
+        local type=$(get_param "type")
+        
+        local tls_obj="\"tls\":{\"enabled\":true,\"server_name\":\"$sni\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}"
+        if [[ "$sec" == "reality" ]]; then
+            local pbk=$(get_param "pbk")
+            local sid=$(get_param "sid")
+            tls_obj="${tls_obj},\"reality\":{\"enabled\":true,\"public_key\":\"$pbk\",\"short_id\":\"$sid\"}}"
+        else
+            tls_obj="${tls_obj}}"
+        fi
+        
+        local trans_obj=""
+        if [[ "$type" == "ws" ]]; then trans_obj=",\"transport\":{\"type\":\"ws\",\"path\":\"$(get_param "path")\"}"; fi
+        if [[ "$type" == "grpc" ]]; then trans_obj=",\"transport\":{\"type\":\"grpc\",\"service_name\":\"$(get_param "serviceName")\"}"; fi
+        
+        local flow_str=""
+        [[ -n "$flow" ]] && flow_str=",\"flow\":\"$flow\""
+        
+        echo "{\"type\":\"vless\",\"tag\":\"proxy\",\"server\":\"$host\",\"server_port\":$port,\"uuid\":\"$uuid\"${flow_str},${tls_obj}${trans_obj}}"
+    fi
+}
+
 ss() {
     clear
     echo -e "${B}=====================================${P}"
@@ -246,86 +320,26 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl restart sing-box && systemctl enable sing-box
     echo -e "\n${G}服务端配置完毕${P}"
-    echo -e "${B}=== 分享链接 (请复制并导入客户端) ===${P}"
+    echo -e "${B}=== 单行节点链接 (请复制用于导入客户端) ===${P}"
     echo "$co"
-    echo -e "${B}=====================================${P}"
+    echo -e "${B}===========================================${P}"
     pause
-}
-
-u2j() {
-    local u="$1"
-    local pr=$(echo "$u" | awk -F'://' '{print $1}')
-    local ma=$(echo "$u" | awk -F'://' '{print $2}' | awk -F'#' '{print $1}')
-    local qu=$(echo "$ma" | awk -F'?' '{print $2}')
-    local au=$(echo "$ma" | awk -F'?' '{print $1}')
-    local ui=$(echo "$au" | grep -o '.*@' | sed 's/@$//')
-    local hp=$(echo "$au" | sed "s/^$ui@//")
-    local ho=$(echo "$hp" | awk -F':' '{print $1}')
-    local po=$(echo "$hp" | awk -F':' '{print $2}')
-    
-    gq() { echo "$1" | tr '&' '\n' | grep "^$2=" | cut -d= -f2- ; }
-
-    if [[ "$pr" == "hysteria2" ]]; then
-        local sn=$(gq "$qu" "sni")
-        local al=$(gq "$qu" "alpn"); [[ -z "$al" ]] && al="h3"
-        echo "{\"type\":\"hysteria2\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"password\":\"$ui\",\"tls\":{\"enabled\":true,\"server_name\":\"$sn\",\"alpn\":[\"$al\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
-    elif [[ "$pr" == "socks5" ]]; then
-        local us=$(echo "$ui" | cut -d: -f1)
-        local pa=$(echo "$ui" | cut -d: -f2)
-        echo "{\"type\":\"socks\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"username\":\"$us\",\"password\":\"$pa\"}"
-    elif [[ "$pr" == "tuic" ]]; then
-        local uu=$(echo "$ui" | cut -d: -f1)
-        local pa=$(echo "$ui" | cut -d: -f2)
-        local sn=$(gq "$qu" "sni")
-        local cc=$(gq "$qu" "congestion_control")
-        local al=$(gq "$qu" "alpn")
-        echo "{\"type\":\"tuic\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"uuid\":\"$uu\",\"password\":\"$pa\",\"congestion_control\":\"$cc\",\"tls\":{\"enabled\":true,\"server_name\":\"$sn\",\"alpn\":[\"$al\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
-    elif [[ "$pr" == "vless" || "$pr" == "trojan" ]]; then
-        local sn=$(gq "$qu" "sni")
-        local tp=$(gq "$qu" "type")
-        local sc=$(gq "$qu" "security")
-        local tl="\"tls\":{\"enabled\":true,\"server_name\":\"$sn\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}"
-        if [[ "$sc" == "reality" ]]; then
-            local pb=$(gq "$qu" "pbk")
-            local sd=$(gq "$qu" "sid")
-            tl="$tl,\"reality\":{\"enabled\":true,\"public_key\":\"$pb\",\"short_id\":\"$sd\"}}"
-        else
-            tl="$tl}"
-        fi
-        local tr=""
-        if [[ "$tp" == "ws" ]]; then tr=",\"transport\":{\"type\":\"ws\",\"path\":\"$(gq "$qu" "path")\"}"; fi
-        if [[ "$tp" == "grpc" ]]; then tr=",\"transport\":{\"type\":\"grpc\",\"service_name\":\"$(gq "$qu" "serviceName")\"}"; fi
-        
-        if [[ "$pr" == "vless" ]]; then
-            local fw=$(gq "$qu" "flow")
-            [[ -n "$fw" ]] && fw=",\"flow\":\"$fw\""
-            echo "{\"type\":\"vless\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"uuid\":\"$ui\"${fw},${tl}${tr}}"
-        else
-            echo "{\"type\":\"trojan\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"password\":\"$ui\",${tl}${tr}}"
-        fi
-    elif [[ "$pr" == "vmess" ]]; then
-        local vj=$(echo "$u" | sed 's/vmess:\/\///' | base64 -d 2>/dev/null)
-        local va=$(echo "$vj" | jq -r .add)
-        local vp=$(echo "$vj" | jq -r .port)
-        local vi=$(echo "$vj" | jq -r .id)
-        local vn=$(echo "$vj" | jq -r .net)
-        local vs=$(echo "$vj" | jq -r .sni)
-        local vph=$(echo "$vj" | jq -r .path)
-        echo "{\"type\":\"vmess\",\"tag\":\"proxy\",\"server\":\"$va\",\"server_port\":$vp,\"uuid\":\"$vi\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"$vs\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"$vn\",\"path\":\"$vph\"}}"
-    fi
 }
 
 in_c() {
     mkdir -p "$ND"
     read -r -p "请输入节点保存名称 (如 us1): " na
-    [[ -z "$na" ]] && { echo -e "${R}名称不可为空${P}"; pause; return; }
-    
-    read -r -p "粘贴节点链接 (如 hysteria2://...): " uri
-    [[ -z "$uri" ]] && { echo -e "${R}链接不可为空${P}"; pause; return; }
+    if [[ -z "$na" ]]; then echo -e "${R}不可为空${P}"; pause; return; fi
+    read -r -p "粘贴节点链接: " uri
+    if [[ -z "$uri" ]]; then echo -e "${R}不可为空${P}"; pause; return; fi
+
+    local nj=$(u2j "$uri")
+    if [[ -z "$nj" || "$nj" == "null" ]]; then
+        echo -e "${R}解析失败，格式不支持${P}"; pause; return
+    fi
 
     if [[ "$uri" == vmess://* ]]; then
-        local vj=$(echo "$uri" | sed 's/vmess:\/\///' | base64 -d 2>/dev/null)
-        vj=$(echo "$vj" | jq -c ".ps=\"$na\"")
+        local vj=$(echo "${uri#vmess://}" | base64 -d 2>/dev/null | jq -c ".ps=\"$na\"")
         uri="vmess://$(echo -n "$vj" | base64 -w 0)"
     else
         uri=$(echo "$uri" | awk -F'#' '{print $1}')
@@ -333,7 +347,9 @@ in_c() {
     fi
 
     echo "$uri" > "$ND/$na.uri"
-    echo -e "${G}成功识别并保存节点: $na${P}"
+    echo "$nj" > "$ND/$na.json"
+    
+    echo -e "${G}导入成功: $na${P}"
     pause
 }
 
@@ -341,19 +357,13 @@ ls_c() {
     mkdir -p "$ND"
     local fs=("$ND"/*.uri)
     if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
-        echo -e "${Y}暂无保存的节点，请先导入新节点${P}"; pause; return
+        echo -e "${Y}暂无节点${P}"; pause; return
     fi
 
     echo -e "${B}--- 节点列表 ---${P}"
-    for i in "${!fs[@]}"; do
-        local na=$(basename "${fs[$i]}" .uri)
-        local ur=$(cat "${fs[$i]}")
-        local pr=$(echo "$ur" | awk -F'://' '{print $1}')
-        echo "$((i+1)). $na [$pr]"
-    done
+    for i in "${!fs[@]}"; do echo "$((i+1)). $(basename "${fs[$i]}" .uri)"; done
     echo "0. 返回"
-    echo -e "${B}----------------${P}"
-    read -r -p "输入数字选择节点并启用: " sel
+    read -r -p "输入数字启用节点: " sel
     
     if [[ "$sel" == "0" ]]; then return; fi
     if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then
@@ -361,11 +371,8 @@ ls_c() {
     fi
 
     local f="${fs[$((sel-1))]}"
-    local ur=$(cat "$f")
     local na=$(basename "$f" .uri)
-    
-    local nj=$(u2j "$ur")
-    if [[ -z "$nj" ]]; then echo -e "${R}解析 JSON 失败${P}"; pause; return; fi
+    local nj=$(cat "$ND/$na.json")
 
     cat <<EOF > "$CC"
 {"log": {"level": "info"},"inbounds": [{"type": "tun","tag": "tun-in","interface_name": "sing-tun","inet4_address": "172.19.0.1/30","auto_route": true,"strict_route": true,"sniff": true},{"type":"mixed","tag":"mix-in","listen":"127.0.0.1","listen_port":2080}],"outbounds": [$nj,{"type": "direct", "tag": "direct"},{"type": "block", "tag": "block"}],"route": {"rules": [{"protocol": "ssh","outbound": "direct"},{"port": 22,"outbound": "direct"},{"geosite": ["cn"], "geoip": ["cn", "private"], "outbound": "direct"}],"auto_detect_interface": true}}
@@ -383,27 +390,24 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl restart sing-box-client && systemctl enable sing-box-client
-    echo -e "${G}全局透明代理已启动 ($na)${P}"
-    echo -e "${B}正在检测网络连通性...${P}"
+    echo -e "${G}节点 [$na] 已启用，正在检测连通性...${P}"
     sleep 2
     
     local i4=$(curl -x socks5h://127.0.0.1:2080 -s4 -m 5 ip.sb 2>/dev/null)
-    local i6=$(curl -x socks5h://127.0.0.1:2080 -s6 -m 5 ip.sb 2>/dev/null)
     local go=$(curl -x socks5h://127.0.0.1:2080 -s -m 5 ipinfo.io/country 2>/dev/null)
-    [[ -n "$i4" ]] && echo -e "IPv4: ${G}$i4${P} (国家: $go)" || echo -e "IPv4: ${R}无${P}"
-    [[ -n "$i6" ]] && echo -e "IPv6: ${G}$i6${P}" || echo -e "IPv6: ${R}无${P}"
+    [[ -n "$i4" ]] && echo -e "IPv4: ${G}$i4${P} ($go)" || echo -e "IPv4: ${R}无${P}"
     
     local lat=$(curl -o /dev/null -s -w "%{time_total}\n" -m 5 -x socks5h://127.0.0.1:2080 https://www.google.com 2>/dev/null)
     if [[ -n "$lat" && "$lat" != "0.000" ]]; then
-        echo -e "TCP: ${G}连通${P} (Google 延迟: ${lat}秒)"
+        echo -e "TCP: ${G}连通${P} (延迟: ${lat}秒)"
     else
-        echo -e "TCP: ${R}失败或超时${P}"
+        echo -e "TCP: ${R}失败${P}"
     fi
 
     if dig @8.8.8.8 google.com +time=3 +short >/dev/null 2>&1; then
         echo -e "UDP: ${G}连通${P} (DNS解析成功)"
     else
-        echo -e "UDP: ${Y}未知或失败${P}"
+        echo -e "UDP: ${R}失败${P}"
     fi
     pause
 }
@@ -411,24 +415,15 @@ EOF
 ex_c() {
     mkdir -p "$ND"
     local fs=("$ND"/*.uri)
-    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
-        echo -e "${Y}暂无保存的节点${P}"; pause; return
-    fi
+    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then echo -e "${Y}暂无节点${P}"; pause; return; fi
     echo -e "${B}--- 导出节点 ---${P}"
-    for i in "${!fs[@]}"; do
-        local na=$(basename "${fs[$i]}" .uri)
-        echo "$((i+1)). $na"
-    done
+    for i in "${!fs[@]}"; do echo "$((i+1)). $(basename "${fs[$i]}" .uri)"; done
     echo "0. 返回"
-    echo -e "${B}----------------${P}"
     read -r -p "输入数字导出: " sel
     if [[ "$sel" == "0" ]]; then return; fi
-    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then
-        echo -e "${R}选错${P}"; sleep 1; ex_c; return
-    fi
-    local f="${fs[$((sel-1))]}"
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then echo -e "${R}选错${P}"; sleep 1; ex_c; return; fi
     echo -e "\n${G}节点链接:${P}"
-    cat "$f"
+    cat "${fs[$((sel-1))]}"
     echo ""
     pause
 }
@@ -436,23 +431,149 @@ ex_c() {
 rm_c() {
     mkdir -p "$ND"
     local fs=("$ND"/*.uri)
-    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
-        echo -e "${Y}暂无保存的节点${P}"; pause; return
-    fi
+    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then echo -e "${Y}暂无节点${P}"; pause; return; fi
     echo -e "${B}--- 删除节点 ---${P}"
-    for i in "${!fs[@]}"; do
-        local na=$(basename "${fs[$i]}" .uri)
-        echo "$((i+1)). $na"
-    done
+    for i in "${!fs[@]}"; do echo "$((i+1)). $(basename "${fs[$i]}" .uri)"; done
     echo "0. 返回"
-    echo -e "${B}----------------${P}"
     read -r -p "输入数字删除: " sel
     if [[ "$sel" == "0" ]]; then return; fi
-    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then
-        echo -e "${R}选择无效${P}"; sleep 1; rm_c; return
-    fi
-    local f="${fs[$((sel-1))]}"
-    local na=$(basename "$f" .uri)
-    rm -f "$f"
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then echo -e "${R}选错${P}"; sleep 1; rm_c; return; fi
+    local na=$(basename "${fs[$((sel-1))]}" .uri)
+    rm -f "${fs[$((sel-1))]}" "$ND/$na.json"
     echo -e "${G}已删除: $na${P}"
     pause
+}
+
+tg_c() {
+    systemctl stop sing-box-client && systemctl disable sing-box-client
+    echo -e "${Y}已断开，物理直连恢复${P}"
+    pause
+}
+
+sc() {
+    while true; do
+        clear
+        echo -e "${B}=====================================${P}"
+        echo "1. 导入新节点"
+        echo "2. 节点列表与启用"
+        echo "3. 导出节点链接"
+        echo "4. 关闭代理 (恢复直连)"
+        echo "5. 删除节点"
+        echo "0. 返回"
+        echo -e "${B}=====================================${P}"
+        read -r -p "选择: " cc
+        case "$cc" in
+            1) in_c ;;
+            2) ls_c ;;
+            3) ex_c ;;
+            4) tg_c ;;
+            5) rm_c ;;
+            0) return ;;
+            *) echo -e "${R}选错${P}"; sleep 1 ;;
+        esac
+    done
+}
+
+st() {
+    clear
+    echo -e "${B}--- 内核版本检查 ---${P}"
+    if [[ -f "$BP" ]]; then
+        local cv=$($BP version | grep "sing-box version" | awk '{print $3}')
+        local nv=$(curl -s -m 5 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+        local nt=${nv#v}
+        if [[ "$cv" == "$nt" ]]; then
+            echo -e "${G}已是最新版 ($cv)${P}"
+        else
+            echo -e "${Y}发现新版本 ($nv)，正在平滑更新...${P}"
+            ins
+            systemctl is-active --quiet sing-box && systemctl restart sing-box
+            systemctl is-active --quiet sing-box-client && systemctl restart sing-box-client
+            echo -e "${G}更新完毕${P}"
+        fi
+    else
+        echo -e "${R}内核未安装${P}"
+    fi
+
+    echo -e "\n${B}--- 本机 IP (物理直连) ---${P}"
+    local i4=$(curl -s4 -m 3 ip.sb)
+    local i6=$(curl -s6 -m 3 ip.sb)
+    local go=$(curl -s -m 3 ipinfo.io/country)
+    [[ -n "$i4" ]] && echo -e "IPv4: ${G}$i4${P} ($go)" || echo -e "IPv4: ${R}无${P}"
+    [[ -n "$i6" ]] && echo -e "IPv6: ${G}$i6${P}" || echo -e "IPv6: ${R}无${P}"
+
+    echo -e "\n${B}--- 代理运行状态 ---${P}"
+    if systemctl is-active --quiet sing-box; then echo -e "服务端: ${G}运行中${P}"; else echo -e "服务端: ${R}未运行${P}"; fi
+    
+    if systemctl is-active --quiet sing-box-client; then 
+        echo -e "客户端: ${G}代理中 (全局透明网卡接管)${P}"
+        echo -e "\n${B}--- 代理过墙 IP ---${P}"
+        local pi4=$(curl -x socks5h://127.0.0.1:2080 -s4 -m 5 ip.sb 2>/dev/null)
+        local pi6=$(curl -x socks5h://127.0.0.1:2080 -s6 -m 5 ip.sb 2>/dev/null)
+        local pgo=$(curl -x socks5h://127.0.0.1:2080 -s -m 5 ipinfo.io/country 2>/dev/null)
+        [[ -n "$pi4" ]] && echo -e "IPv4: ${G}$pi4${P} ($pgo)" || echo -e "IPv4: ${R}无${P}"
+        [[ -n "$pi6" ]] && echo -e "IPv6: ${G}$pi6${P}" || echo -e "IPv6: ${R}无${P}"
+    else 
+        echo -e "客户端: ${R}未运行 (当前网络为直连)${P}"
+    fi
+
+    echo -e "\n${B}--- 证书续签状态 ---${P}"
+    if [[ -f "${CR}/domain.txt" ]]; then
+        local d=$(cat "${CR}/domain.txt")
+        echo -e "域名: ${G}$d${P}"
+        if [[ -f "${CR}/fullchain.cer" ]]; then
+            local ed=$(openssl x509 -in ${CR}/fullchain.cer -noout -enddate 2>/dev/null | cut -d= -f2)
+            echo -e "到期时间: ${G}$ed${P}"
+        fi
+        if crontab -l | grep -q "RenewTLS"; then
+            echo -e "自动续签: ${G}已开启${P}"
+        else
+            echo -e "自动续签: ${R}未开启${P}"
+        fi
+    else
+        echo -e "${Y}无需证书或未配置${P}"
+    fi
+    echo ""
+    pause
+}
+
+ua() {
+    echo -e "${R}确认彻底卸载？[y/n]: ${P}"
+    read -r cf
+    if [[ "$cf" != "y" ]]; then return; fi
+    systemctl stop sing-box sing-box-client >/dev/null 2>&1
+    systemctl disable sing-box sing-box-client >/dev/null 2>&1
+    rm -f /etc/systemd/system/sing-box.service /etc/systemd/system/sing-box-client.service
+    systemctl daemon-reload
+    if [[ -f "$HOME/.acme.sh/acme.sh" ]]; then
+        "$HOME/.acme.sh/acme.sh" --uninstall
+        rm -rf "$HOME/.acme.sh"
+    fi
+    crontab -l > /tmp/bc.cron 2>/dev/null
+    sed -i '/s.sh RenewTLS/d' /tmp/bc.cron
+    crontab /tmp/bc.cron
+    rm -rf "$BP" "$CD" /usr/bin/s /root/s.sh
+    echo -e "${G}卸载完成，系统无残留${P}"
+    exit 0
+}
+
+while true; do
+    clear
+    echo -e "${B}=====================================${P}"
+    echo -e "${G}   Sing-box 管理面板${P}"
+    echo -e "${B}=====================================${P}"
+    echo "1. 服务端"
+    echo "2. 客户端"
+    echo "3. 状态"
+    echo "4. 卸载"
+    echo "0. 退出"
+    echo -e "${B}=====================================${P}"
+    read -r -p "选择: " ch
+    case "$ch" in
+        1) ss ;;
+        2) sc ;;
+        3) st ;;
+        4) ua ;;
+        0) exit 0 ;;
+        *) echo -e "${R}选错${P}"; sleep 1 ;;
+    esac
+done
