@@ -2235,136 +2235,7 @@ acme_setup() {
         msg "证书注册邮箱:"; dim "(用于到期提醒)"; read -r -p "> " em
         em=$(trim "$em")
         [[ $em =~ ^[^@[:space:]]+@[^@[:space:]]+\.[A-Za-z]{2,}$ ]] && break
-        warn "邮箱格式不正确。"
-    done
-    echo
-    msg "正在安装..."
-    curl -fsSL https://get.acme.sh | sh -s email="$em" >/dev/null 2>&1
-    acme_has || { err "acme.sh 安装失败。"; return 1; }
-    "$ACME" --set-default-ca --server letsencrypt >/dev/null 2>&1
-    "$ACME" --upgrade --auto-upgrade >/dev/null 2>&1
-    ok "acme.sh 就绪"; echo
-}
 
-dom_here() {
-    local ips a
-    ips=$(resolve "$1") || return 0
-    [[ -z $ips ]] && return 1
-    pub_ip
-    for a in $ips; do
-        [[ $a == "$PUB4" || $a == "$PUB6" ]] && return 0
-        is_local_addr "$a" && return 0
-    done
-    return 1
-}
-
-acme_issue() {
-    local d=$1 md=standalone c api v6=""
-    nat_ready
-    if nat_on; then
-        warn "NAT 环境无法使用 HTTP 验证（80 端口不可映射）。"
-        md=dns
-    elif (( NAT_MODE )) && [[ $NAT_TYPE == ipv6only ]]; then
-        warn "本机仅有公网 IPv6，将使用 IPv6 进行 HTTP 验证。"
-        dim "  需确保 AAAA 记录指向 $PUB6"
-        v6="--listen-v6"
-    elif ! dom_here "$d"; then
-        warn "域名 $d 未解析到本机。"
-        dim "  本机: ${PUB4:-无} ${PUB6:-无}"
-        if ask_yn "改用 DNS API 验证？" "N"; then md=dns
-        elif ! ask_yn "仍尝试 HTTP 验证？" "N"; then return 1; fi
-    fi
-    if [[ $md == dns ]]; then
-        msg "选择 DNS 服务商:"; echo
-        msg "  1. Cloudflare"; msg "  2. 阿里云"; msg "  3. 腾讯云 DNSPod"; echo
-        ask_menu c "1 2 3"
-        case $c in
-            1) api=dns_cf; local t; ask_req t "Cloudflare API Token:"; export CF_Token="$t" ;;
-            2) api=dns_ali; local k s; ask_req k "AccessKey ID:"; ask_req s "AccessKey Secret:"
-               export Ali_Key="$k" Ali_Secret="$s" ;;
-            3) api=dns_dp; local i t2; ask_req i "DNSPod ID:"; ask_req t2 "DNSPod Token:"
-               export DP_Id="$i" DP_Key="$t2" ;;
-        esac
-        msg "正在申请证书（DNS 验证）..."
-        "$ACME" --issue -d "$d" --dns "$api" --keylength ec-256 \
-            --server letsencrypt >/dev/null 2>&1 || { err "证书申请失败"; return 1; }
-    else
-        port_busy 80 tcp && {
-            err "80 端口被占用，HTTP 验证无法进行。"
-            dim "  请停止占用者或改用 DNS API 验证。"
-            return 1; }
-        fw_allow 80 tcp
-        msg "正在申请证书（HTTP 验证）..."
-        if ! "$ACME" --issue -d "$d" --standalone $v6 --keylength ec-256 \
-                --server letsencrypt >/dev/null 2>&1; then
-            err "证书申请失败"
-            "$ACME" --issue -d "$d" --standalone $v6 --keylength ec-256 2>&1 \
-                | tail -n 8 | while read -r l; do dim "  $l"; done
-            fw_del 80 tcp
-            return 1
-        fi
-        fw_del 80 tcp
-    fi
-    mkdir -p "$CERT_DIR"; chmod 700 "$CERT_DIR"
-    "$ACME" --install-cert -d "$d" --ecc \
-        --fullchain-file "$TLS_CRT" --key-file "$TLS_KEY" \
-        --reloadcmd "$(reload_cmd)" >/dev/null 2>&1 || { err "证书安装失败。"; return 1; }
-    chmod 600 "$TLS_KEY"
-    printf '%s' "$d" >"$CERT_DOMAIN"
-    ok "证书就绪"; echo
-}
-
-cert_prepare() {
-    local d=$1
-    [[ $(cert_dom) == "$d" ]] && cert_ready && { ok "复用已有证书"; echo; return 0; }
-    acme_setup || return 1
-    acme_issue "$d" || return 1
-    cert_ready || { err "证书文件缺失。"; return 1; }
-}
-
-cert_switch() {
-    local new=$1 f n
-    cert_prepare "$new" || return 1
-    shopt -s nullglob
-    for f in "$SB_NODES"/*.json; do
-        [[ -n $(jq -r '.meta.domain // empty' "$f") ]] || continue
-        jq --arg d "$new" '.server=$d | .meta.domain=$d | .meta.sni=$d
-            | .inbound.tls.server_name=$d' "$f" >"$f.tmp" && mv "$f.tmp" "$f"
-    done
-    shopt -u nullglob
-    cfg_apply || return 1
-    while read -r n; do [[ -n $n ]] && lk_refresh nodes "$n" >/dev/null; done < <(nd_list nodes)
-    ok "已切换到 $new，所有 TLS 节点链接已更新"
-}
-
-ask_domain() {
-    local __v=$1 cur in n
-    cur=$(cert_dom)
-    while :; do
-        msg "绑定域名:"
-        [[ -n $cur ]] && dim "(当前 $cur，回车复用)"
-        read -r -p "> " in
-        in=$(trim "$in"); in=${in#*://}; in=${in%%/*}
-        [[ -z $in && -n $cur ]] && in=$cur
-        is_domain "$in" || { warn "域名格式不正确。"; continue; }
-        if [[ -n $cur && $in != "$cur" ]]; then
-            n=$(tls_nodes)
-            warn "本脚本只维护一份证书。"
-            dim "  换成 $in 后，已有 $n 个 TLS 节点会一起改用新域名，"
-            dim "  旧域名的分享链接全部失效，需重新分发。"
-            ask_yn "确认更换？" "N" || continue
-            cert_switch "$in" || continue
-        fi
-        printf -v "$__v" '%s' "$in"; echo; return 0
-    done
-}
-
-acme_purge() {
-    local d; d=$(cert_dom)
-    [[ -n $d ]] || return 0
-    acme_has && "$ACME" --remove -d "$d" --ecc >/dev/null 2>&1
-    rm -rf "$ACME_HOME/${d}_ecc"
-}
 hop_auto_cap() { [[ $1 == hysteria2 ]]; }
 hop_label()    { hop_auto_cap "$1" && printf '端口跳跃' || printf '多端口复用'; }
 
@@ -2378,7 +2249,6 @@ rg_norm() {
     (( s <= e )) || { t=$s; s=$e; e=$t; }
     printf '%s-%s' "$s" "$e"
 }
-
 rg_s()    { printf '%s' "${1%%-*}"; }
 rg_e()    { printf '%s' "${1##*-}"; }
 rg_size() { printf '%d' $(( $(rg_e "$1") - $(rg_s "$1") + 1 )); }
