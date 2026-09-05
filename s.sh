@@ -24,6 +24,11 @@ if [[ "$1" == "RenewTLS" ]]; then
     exit 0
 fi
 
+pause() {
+    read -n1 -r -p "按任意键继续..."
+    echo ""
+}
+
 op() {
     local p=$1 c=${2:-tcp}
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q active; then
@@ -46,7 +51,7 @@ ck() {
     local ds=("curl" "wget" "jq" "socat" "openssl" "cron")
     for d in "${ds[@]}"; do
         if ! command -v "$d" >/dev/null 2>&1; then
-            echo -e "${Y}依赖: $d ${P}"
+            echo -e "${Y}安装依赖: $d ${P}"
             if command -v apt >/dev/null 2>&1; then
                 apt update >/dev/null 2>&1 && apt install -y "$d" >/dev/null 2>&1
             elif command -v yum >/dev/null 2>&1; then
@@ -54,12 +59,16 @@ ck() {
             fi
         fi
     done
+    if ! command -v dig >/dev/null 2>&1; then
+        if command -v apt >/dev/null 2>&1; then apt install -y dnsutils >/dev/null 2>&1; fi
+        if command -v yum >/dev/null 2>&1; then yum install -y bind-utils >/dev/null 2>&1; fi
+    fi
 }
 
 dc() {
     local a=$(uname -m)
     if [[ "$a" == "x86_64" || "$a" == "amd64" ]]; then
-        if grep -q "avx2" /proc/cpuinfo; then echo "amd64-v3"; else echo "amd64"; fi
+        if grep -q "avx2" /proc/cpuinfo; then echo "amd64v3"; else echo "amd64"; fi
     elif [[ "$a" == "aarch64" || "$a" == "arm64" ]]; then
         echo "arm64"
     else
@@ -72,11 +81,19 @@ ins() {
     local c=$(dc)
     local v=$(curl -s -m 5 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
     echo -e "${B}获取内核: ${v} ($c)${P}"
-    wget -qO /tmp/sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${v}/sing-box-${v#v}-linux-${c}.tar.gz"
-    tar -xzf /tmp/sb.tar.gz -C /tmp
+    local u="https://github.com/SagerNet/sing-box/releases/download/${v}/sing-box-${v#v}-linux-${c}.tar.gz"
+    
+    wget -qO /tmp/sb.tar.gz "$u" || wget -qO /tmp/sb.tar.gz "https://ghp.ci/$u"
+    
+    if ! tar -xzf /tmp/sb.tar.gz -C /tmp 2>/dev/null; then
+        echo -e "${R}解压失败: 下载无效，请检查网络是否能访问 GitHub。${P}"
+        rm -f /tmp/sb.tar.gz
+        exit 1
+    fi
+    
+    mkdir -p "$CD" "$CR" "$ND"
     mv /tmp/sing-box-*/sing-box "$BP"
     chmod +x "$BP"
-    mkdir -p "$CD" "$CR" "$ND"
     rm -rf /tmp/sb.tar.gz /tmp/sing-box-*
 }
 
@@ -124,8 +141,7 @@ rn() {
 }
 
 ss() {
-    if [[ ! -f "$BP" ]]; then ins; fi
-    mkdir -p "$CD" "$CR" "$ND"
+    clear
     echo -e "${B}=====================================${P}"
     echo "1. VLESS-Reality-Vision"
     echo "2. VLESS-Reality-gRPC"
@@ -137,9 +153,23 @@ ss() {
     echo "8. Hysteria2"
     echo "9. TUIC"
     echo "10. SOCKS5"
+    echo "0. 返回"
     echo -e "${B}=====================================${P}"
     read -r -p "选择: " pc
     
+    if [[ "$pc" == "0" ]]; then return; fi
+    if [[ ! "$pc" =~ ^([1-9]|10)$ ]]; then echo -e "${R}选错${P}"; sleep 1; ss; return; fi
+
+    local dm=""
+    if [[ "$pc" =~ ^[3-9]$ ]]; then
+        read -r -p "解析到本机的域名: " dm
+        if [[ -z "$dm" ]]; then echo -e "${R}域名不可为空${P}"; sleep 1; ss; return; fi
+    fi
+
+    if [[ ! -f "$BP" ]]; then ins; fi
+    mkdir -p "$CD" "$CR" "$ND"
+    if [[ "$pc" =~ ^[3-9]$ ]]; then ic "$dm"; fi
+
     local pt=$((RANDOM % 20000 + 10000))
     local ud=$($BP generate uuid)
     local ip=$(curl -s4 -m 5 ip.sb)
@@ -149,60 +179,56 @@ ss() {
     op $pt tcp
     op $pt udp
 
-    if [[ "$pc" =~ ^[3-9]$ ]]; then
-        read -r -p "解析到本机的域名: " dm
-        ic "$dm"
-    fi
-
     case "$pc" in
         1)
             local ks=$($BP generate reality-keypair)
             local pk=$(echo "$ks" | grep PrivateKey | awk '{print $2}'); local pb=$(echo "$ks" | grep PublicKey | awk '{print $2}')
             si="{\"type\": \"vless\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\",\"flow\": \"xtls-rprx-vision\"}],\"tls\": {\"enabled\": true,\"server_name\": \"www.microsoft.com\",\"reality\": {\"enabled\": true,\"handshake\": {\"server\": \"www.microsoft.com\",\"server_port\": 443},\"private_key\": \"$pk\",\"short_id\": [\"\",\"6ba85179e30d4fc2\"]}}}"
-            co="{\"type\": \"vless\",\"tag\": \"proxy\",\"server\": \"$ip\",\"server_port\": $pt,\"uuid\": \"$ud\",\"flow\": \"xtls-rprx-vision\",\"tls\": {\"enabled\": true,\"server_name\": \"www.microsoft.com\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"},\"reality\": {\"enabled\": true,\"public_key\": \"$pb\",\"short_id\": \"6ba85179e30d4fc2\"}}}"
+            co="vless://${ud}@${ip}:${pt}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${pb}&sid=6ba85179e30d4fc2&type=tcp&headerType=none#VLESS-Reality"
             ;;
         2)
             local ks=$($BP generate reality-keypair)
             local pk=$(echo "$ks" | grep PrivateKey | awk '{print $2}'); local pb=$(echo "$ks" | grep PublicKey | awk '{print $2}')
             si="{\"type\": \"vless\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\"}],\"transport\": {\"type\": \"grpc\",\"service_name\": \"grpc\"},\"tls\": {\"enabled\": true,\"server_name\": \"www.microsoft.com\",\"reality\": {\"enabled\": true,\"handshake\": {\"server\": \"www.microsoft.com\",\"server_port\": 443},\"private_key\": \"$pk\",\"short_id\": [\"\",\"6ba85179e30d4fc2\"]}}}"
-            co="{\"type\": \"vless\",\"tag\": \"proxy\",\"server\": \"$ip\",\"server_port\": $pt,\"uuid\": \"$ud\",\"transport\": {\"type\": \"grpc\",\"service_name\": \"grpc\"},\"tls\": {\"enabled\": true,\"server_name\": \"www.microsoft.com\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"},\"reality\": {\"enabled\": true,\"public_key\": \"$pb\",\"short_id\": \"6ba85179e30d4fc2\"}}}"
+            co="vless://${ud}@${ip}:${pt}?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=${pb}&sid=6ba85179e30d4fc2&type=grpc&serviceName=grpc#VLESS-gRPC"
             ;;
         3)
             si="{\"type\": \"vless\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\",\"flow\": \"xtls-rprx-vision\"}],\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"vless\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"uuid\": \"$ud\",\"flow\": \"xtls-rprx-vision\",\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            co="vless://${ud}@${dm}:${pt}?encryption=none&flow=xtls-rprx-vision&security=tls&sni=${dm}&fp=chrome&type=tcp&headerType=none#VLESS-Vision"
             ;;
         4)
             local ph="/$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)ws"
             si="{\"type\": \"vless\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\"}],\"transport\": {\"type\": \"ws\",\"path\": \"$ph\"},\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"vless\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"uuid\": \"$ud\",\"transport\": {\"type\": \"ws\",\"path\": \"$ph\"},\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            co="vless://${ud}@${dm}:${pt}?encryption=none&security=tls&sni=${dm}&fp=chrome&type=ws&path=${ph}#VLESS-WS"
             ;;
         5)
             local ph="/$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)vws"
             si="{\"type\": \"vmess\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\",\"alterId\": 0}],\"transport\": {\"type\": \"ws\",\"path\": \"$ph\"},\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"vmess\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"uuid\": \"$ud\",\"security\": \"auto\",\"alter_id\": 0,\"transport\": {\"type\": \"ws\",\"path\": \"$ph\"},\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            local vj="{\"v\":\"2\",\"ps\":\"VMess-WS\",\"add\":\"${dm}\",\"port\":${pt},\"id\":\"${ud}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${dm}\",\"path\":\"${ph}\",\"tls\":\"tls\",\"sni\":\"${dm}\"}"
+            co="vmess://$(echo -n "$vj" | base64 -w 0)"
             ;;
         6)
             local ph="/$(tr -dc 'a-z0-9' </dev/urandom | head -c 6)hup"
             si="{\"type\": \"vmess\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\",\"alterId\": 0}],\"transport\": {\"type\": \"httpupgrade\",\"path\": \"$ph\"},\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"vmess\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"uuid\": \"$ud\",\"security\": \"auto\",\"alter_id\": 0,\"transport\": {\"type\": \"httpupgrade\",\"path\": \"$ph\"},\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            local vj="{\"v\":\"2\",\"ps\":\"VMess-HTTPUpgrade\",\"add\":\"${dm}\",\"port\":${pt},\"id\":\"${ud}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${dm}\",\"path\":\"${ph}\",\"tls\":\"tls\",\"sni\":\"${dm}\"}"
+            co="vmess://$(echo -n "$vj" | base64 -w 0)"
             ;;
         7)
             si="{\"type\": \"trojan\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"password\": \"$ud\"}],\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"trojan\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"password\": \"$ud\",\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            co="trojan://${ud}@${dm}:${pt}?security=tls&sni=${dm}&fp=chrome&type=tcp#Trojan"
             ;;
         8)
             si="{\"type\": \"hysteria2\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"password\": \"$ud\"}],\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"alpn\": [\"h3\"],\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"hysteria2\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"password\": \"$ud\",\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"alpn\": [\"h3\"],\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            co="hysteria2://${ud}@${dm}:${pt}?peer=${dm}&insecure=0&sni=${dm}&alpn=h3#Hysteria2"
             ;;
         9)
             si="{\"type\": \"tuic\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"uuid\": \"$ud\", \"password\": \"$ud\"}],\"congestion_control\": \"bbr\",\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"alpn\": [\"h3\"],\"certificate_path\": \"${CR}/fullchain.cer\",\"key_path\": \"${CR}/private.key\"}}"
-            co="{\"type\": \"tuic\",\"tag\": \"proxy\",\"server\": \"$dm\",\"server_port\": $pt,\"uuid\": \"$ud\",\"password\": \"$ud\",\"congestion_control\": \"bbr\",\"tls\": {\"enabled\": true,\"server_name\": \"$dm\",\"alpn\": [\"h3\"],\"utls\": {\"enabled\": true,\"fingerprint\": \"chrome\"}}}"
+            co="tuic://${ud}:${ud}@${dm}:${pt}?congestion_control=bbr&sni=${dm}&alpn=h3#TUIC"
             ;;
         10)
             si="{\"type\": \"socks\",\"listen\": \"::\",\"listen_port\": $pt,\"users\": [{\"username\": \"$ud\", \"password\": \"$ud\"}]}"
-            co="{\"type\": \"socks\",\"tag\": \"proxy\",\"server\": \"$ip\",\"server_port\": $pt,\"username\": \"$ud\",\"password\": \"$ud\"}"
+            co="socks5://${ud}:${ud}@${ip}:${pt}#SOCKS5"
             ;;
-        *) echo -e "${R}错误${P}"; exit 1 ;;
     esac
 
     echo "{\"log\": {\"level\": \"info\"},\"inbounds\": [$si]}" > "$CS"
@@ -220,57 +246,131 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl restart sing-box && systemctl enable sing-box
     echo -e "\n${G}服务端配置完毕${P}"
-    echo -e "${B}=== 节点JSON (请复制并导入客户端) ===${P}"
-    echo "$co" | jq .
+    echo -e "${B}=== 分享链接 (请复制并导入客户端) ===${P}"
+    echo "$co"
     echo -e "${B}=====================================${P}"
+    pause
 }
 
-inn() {
-    mkdir -p "$ND"
-    read -r -p "节点别名 (如 us1): " na
-    [[ -z "$na" ]] && { echo -e "${R}别名不可为空${P}"; return; }
-    echo -e "${B}粘贴JSON配置 (回车后按 Ctrl+D 结束):${P}"
-    cat | jq . > "$ND/$na.json"
-    echo -e "${G}导入成功: $na${P}"
-}
+u2j() {
+    local u="$1"
+    local pr=$(echo "$u" | awk -F'://' '{print $1}')
+    local ma=$(echo "$u" | awk -F'://' '{print $2}' | awk -F'#' '{print $1}')
+    local qu=$(echo "$ma" | awk -F'?' '{print $2}')
+    local au=$(echo "$ma" | awk -F'?' '{print $1}')
+    local ui=$(echo "$au" | grep -o '.*@' | sed 's/@$//')
+    local hp=$(echo "$au" | sed "s/^$ui@//")
+    local ho=$(echo "$hp" | awk -F':' '{print $1}')
+    local po=$(echo "$hp" | awk -F':' '{print $2}')
+    
+    gq() { echo "$1" | tr '&' '\n' | grep "^$2=" | cut -d= -f2- ; }
 
-lsn() {
-    mkdir -p "$ND"
-    echo -e "${B}--- 节点列表 ---${P}"
-    for f in "$ND"/*.json; do
-        [[ -f "$f" ]] || continue
-        local na=$(basename "$f" .json)
-        local sv=$(jq -r .server "$f" 2>/dev/null)
-        local la=$(ping -c 1 -W 1 "$sv" 2>/dev/null | grep time= | awk -F'time=' '{print $2}')
-        [[ -z "$la" ]] && la="超时"
-        echo -e "${G}$na${P} -> $sv (延迟: $la)"
-    done
-}
-
-rmn() {
-    mkdir -p "$ND"
-    ls -1 "$ND" | sed 's/\.json$//'
-    read -r -p "输入要删除的别名: " na
-    if [[ -f "$ND/$na.json" ]]; then
-        rm -f "$ND/$na.json"
-        echo -e "${G}已删除 $na${P}"
-    else
-        echo -e "${R}节点不存在${P}"
+    if [[ "$pr" == "hysteria2" ]]; then
+        local sn=$(gq "$qu" "sni")
+        local al=$(gq "$qu" "alpn"); [[ -z "$al" ]] && al="h3"
+        echo "{\"type\":\"hysteria2\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"password\":\"$ui\",\"tls\":{\"enabled\":true,\"server_name\":\"$sn\",\"alpn\":[\"$al\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
+    elif [[ "$pr" == "socks5" ]]; then
+        local us=$(echo "$ui" | cut -d: -f1)
+        local pa=$(echo "$ui" | cut -d: -f2)
+        echo "{\"type\":\"socks\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"username\":\"$us\",\"password\":\"$pa\"}"
+    elif [[ "$pr" == "tuic" ]]; then
+        local uu=$(echo "$ui" | cut -d: -f1)
+        local pa=$(echo "$ui" | cut -d: -f2)
+        local sn=$(gq "$qu" "sni")
+        local cc=$(gq "$qu" "congestion_control")
+        local al=$(gq "$qu" "alpn")
+        echo "{\"type\":\"tuic\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"uuid\":\"$uu\",\"password\":\"$pa\",\"congestion_control\":\"$cc\",\"tls\":{\"enabled\":true,\"server_name\":\"$sn\",\"alpn\":[\"$al\"],\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}}}"
+    elif [[ "$pr" == "vless" || "$pr" == "trojan" ]]; then
+        local sn=$(gq "$qu" "sni")
+        local tp=$(gq "$qu" "type")
+        local sc=$(gq "$qu" "security")
+        local tl="\"tls\":{\"enabled\":true,\"server_name\":\"$sn\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}"
+        if [[ "$sc" == "reality" ]]; then
+            local pb=$(gq "$qu" "pbk")
+            local sd=$(gq "$qu" "sid")
+            tl="$tl,\"reality\":{\"enabled\":true,\"public_key\":\"$pb\",\"short_id\":\"$sd\"}}"
+        else
+            tl="$tl}"
+        fi
+        local tr=""
+        if [[ "$tp" == "ws" ]]; then tr=",\"transport\":{\"type\":\"ws\",\"path\":\"$(gq "$qu" "path")\"}"; fi
+        if [[ "$tp" == "grpc" ]]; then tr=",\"transport\":{\"type\":\"grpc\",\"service_name\":\"$(gq "$qu" "serviceName")\"}"; fi
+        
+        if [[ "$pr" == "vless" ]]; then
+            local fw=$(gq "$qu" "flow")
+            [[ -n "$fw" ]] && fw=",\"flow\":\"$fw\""
+            echo "{\"type\":\"vless\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"uuid\":\"$ui\"${fw},${tl}${tr}}"
+        else
+            echo "{\"type\":\"trojan\",\"tag\":\"proxy\",\"server\":\"$ho\",\"server_port\":$po,\"password\":\"$ui\",${tl}${tr}}"
+        fi
+    elif [[ "$pr" == "vmess" ]]; then
+        local vj=$(echo "$u" | sed 's/vmess:\/\///' | base64 -d 2>/dev/null)
+        local va=$(echo "$vj" | jq -r .add)
+        local vp=$(echo "$vj" | jq -r .port)
+        local vi=$(echo "$vj" | jq -r .id)
+        local vn=$(echo "$vj" | jq -r .net)
+        local vs=$(echo "$vj" | jq -r .sni)
+        local vph=$(echo "$vj" | jq -r .path)
+        echo "{\"type\":\"vmess\",\"tag\":\"proxy\",\"server\":\"$va\",\"server_port\":$vp,\"uuid\":\"$vi\",\"security\":\"auto\",\"alter_id\":0,\"tls\":{\"enabled\":true,\"server_name\":\"$vs\",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}},\"transport\":{\"type\":\"$vn\",\"path\":\"$vph\"}}"
     fi
 }
 
-tgc() {
-    if [[ "$1" == "start" ]]; then
-        mkdir -p "$ND"
-        echo -e "${B}可用节点:${P}"
-        ls -1 "$ND" | sed 's/\.json$//'
-        read -r -p "输入需要启用的节点别名: " na
-        if [[ -f "$ND/$na.json" ]]; then
-            local nj=$(cat "$ND/$na.json")
-            cat <<EOF > "$CC"
+in_c() {
+    mkdir -p "$ND"
+    read -r -p "请输入节点保存名称 (如 us1): " na
+    [[ -z "$na" ]] && { echo -e "${R}名称不可为空${P}"; pause; return; }
+    
+    read -r -p "粘贴节点链接 (如 hysteria2://...): " uri
+    [[ -z "$uri" ]] && { echo -e "${R}链接不可为空${P}"; pause; return; }
+
+    if [[ "$uri" == vmess://* ]]; then
+        local vj=$(echo "$uri" | sed 's/vmess:\/\///' | base64 -d 2>/dev/null)
+        vj=$(echo "$vj" | jq -c ".ps=\"$na\"")
+        uri="vmess://$(echo -n "$vj" | base64 -w 0)"
+    else
+        uri=$(echo "$uri" | awk -F'#' '{print $1}')
+        uri="${uri}#${na}"
+    fi
+
+    echo "$uri" > "$ND/$na.uri"
+    echo -e "${G}成功识别并保存节点: $na${P}"
+    pause
+}
+
+ls_c() {
+    mkdir -p "$ND"
+    local fs=("$ND"/*.uri)
+    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
+        echo -e "${Y}暂无保存的节点，请先导入新节点${P}"; pause; return
+    fi
+
+    echo -e "${B}--- 节点列表 ---${P}"
+    for i in "${!fs[@]}"; do
+        local na=$(basename "${fs[$i]}" .uri)
+        local ur=$(cat "${fs[$i]}")
+        local pr=$(echo "$ur" | awk -F'://' '{print $1}')
+        echo "$((i+1)). $na [$pr]"
+    done
+    echo "0. 返回"
+    echo -e "${B}----------------${P}"
+    read -r -p "输入数字选择节点并启用: " sel
+    
+    if [[ "$sel" == "0" ]]; then return; fi
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then
+        echo -e "${R}选错${P}"; sleep 1; ls_c; return
+    fi
+
+    local f="${fs[$((sel-1))]}"
+    local ur=$(cat "$f")
+    local na=$(basename "$f" .uri)
+    
+    local nj=$(u2j "$ur")
+    if [[ -z "$nj" ]]; then echo -e "${R}解析 JSON 失败${P}"; pause; return; fi
+
+    cat <<EOF > "$CC"
 {"log": {"level": "info"},"inbounds": [{"type": "tun","tag": "tun-in","interface_name": "sing-tun","inet4_address": "172.19.0.1/30","auto_route": true,"strict_route": true,"sniff": true},{"type":"mixed","tag":"mix-in","listen":"127.0.0.1","listen_port":2080}],"outbounds": [$nj,{"type": "direct", "tag": "direct"},{"type": "block", "tag": "block"}],"route": {"rules": [{"protocol": "ssh","outbound": "direct"},{"port": 22,"outbound": "direct"},{"geosite": ["cn"], "geoip": ["cn", "private"], "outbound": "direct"}],"auto_detect_interface": true}}
 EOF
-            cat <<EOF > /etc/systemd/system/sing-box-client.service
+    cat <<EOF > /etc/systemd/system/sing-box-client.service
 [Unit]
 After=network.target
 [Service]
@@ -281,133 +381,78 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-            systemctl daemon-reload
-            systemctl start sing-box-client && systemctl enable sing-box-client
-            echo -e "${G}全局透明代理已启动 ($na)${P}"
-        else
-            echo -e "${R}节点不存在${P}"
-        fi
-    elif [[ "$1" == "stop" ]]; then
-        systemctl stop sing-box-client && systemctl disable sing-box-client
-        echo -e "${Y}已断开，物理直连恢复${P}"
-    fi
-}
-
-sc() {
-    echo -e "${B}=====================================${P}"
-    echo "1. 导入新节点"
-    echo "2. 节点测速列表"
-    echo "3. 选择节点并开启代理"
-    echo "4. 关闭代理"
-    echo "5. 删除节点"
-    echo "0. 返回"
-    echo -e "${B}=====================================${P}"
-    read -r cc
-    case "$cc" in
-        1) inn ;;
-        2) lsn ;;
-        3) tgc start ;;
-        4) tgc stop ;;
-        5) rmn ;;
-        0) m ;;
-        *) echo -e "${R}错误${P}" ;;
-    esac
-}
-
-st() {
-    echo -e "\n${B}--- 内核版本检查 ---${P}"
-    if [[ -f "$BP" ]]; then
-        local cv=$($BP version | grep "sing-box version" | awk '{print $3}')
-        local nv=$(curl -s -m 5 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
-        local nt=${nv#v}
-        if [[ "$cv" == "$nt" ]]; then
-            echo -e "${G}已是最新版 ($cv)${P}"
-        else
-            echo -e "${Y}发现新版本 ($nv)，正在平滑更新...${P}"
-            ins
-            systemctl is-active --quiet sing-box && systemctl restart sing-box
-            systemctl is-active --quiet sing-box-client && systemctl restart sing-box-client
-            echo -e "${G}更新完毕${P}"
-        fi
-    else
-        echo -e "${R}内核未安装${P}"
-    fi
-
-    echo -e "\n${B}--- 本机 IP (直连) ---${P}"
-    local i4=$(curl -s4 -m 3 ip.sb)
-    local i6=$(curl -s6 -m 3 ip.sb)
-    local go=$(curl -s -m 3 ipinfo.io/country)
-    [[ -n "$i4" ]] && echo -e "IPv4: ${G}$i4${P} ($go)" || echo -e "IPv4: ${R}无${P}"
-    [[ -n "$i6" ]] && echo -e "IPv6: ${G}$i6${P}" || echo -e "IPv6: ${R}无${P}"
-
-    if systemctl is-active --quiet sing-box-client; then
-        echo -e "\n${B}--- 节点 IP (代理) ---${P}"
-        local pi4=$(curl -x socks5h://127.0.0.1:2080 -s4 -m 5 ip.sb)
-        local pi6=$(curl -x socks5h://127.0.0.1:2080 -s6 -m 5 ip.sb)
-        local pgo=$(curl -x socks5h://127.0.0.1:2080 -s -m 5 ipinfo.io/country)
-        [[ -n "$pi4" ]] && echo -e "IPv4: ${G}$pi4${P} ($pgo)" || echo -e "IPv4: ${R}无${P}"
-        [[ -n "$pi6" ]] && echo -e "IPv6: ${G}$pi6${P}" || echo -e "IPv6: ${R}无${P}"
-    fi
-
-    echo -e "\n${B}--- 证书续签状态 ---${P}"
-    if [[ -f "${CR}/domain.txt" ]]; then
-        local d=$(cat "${CR}/domain.txt")
-        echo -e "域名: ${G}$d${P}"
-        if [[ -f "${CR}/fullchain.cer" ]]; then
-            local ed=$(openssl x509 -in ${CR}/fullchain.cer -noout -enddate 2>/dev/null | cut -d= -f2)
-            echo -e "到期时间: ${G}$ed${P}"
-        fi
-        if crontab -l | grep -q "RenewTLS"; then
-            echo -e "自动续签: ${G}已开启${P}"
-        else
-            echo -e "自动续签: ${R}未开启${P}"
-        fi
-    else
-        echo -e "${Y}无需证书或未配置${P}"
-    fi
-    echo ""
-}
-
-ua() {
-    echo -e "${R}确认彻底卸载？[y/n]: ${P}"
-    read -r cf
-    if [[ "$cf" != "y" ]]; then return; fi
-    systemctl stop sing-box sing-box-client >/dev/null 2>&1
-    systemctl disable sing-box sing-box-client >/dev/null 2>&1
-    rm -f /etc/systemd/system/sing-box.service /etc/systemd/system/sing-box-client.service
     systemctl daemon-reload
-    if [[ -f "$HOME/.acme.sh/acme.sh" ]]; then
-        "$HOME/.acme.sh/acme.sh" --uninstall
-        rm -rf "$HOME/.acme.sh"
+    systemctl restart sing-box-client && systemctl enable sing-box-client
+    echo -e "${G}全局透明代理已启动 ($na)${P}"
+    echo -e "${B}正在检测网络连通性...${P}"
+    sleep 2
+    
+    local i4=$(curl -x socks5h://127.0.0.1:2080 -s4 -m 5 ip.sb 2>/dev/null)
+    local i6=$(curl -x socks5h://127.0.0.1:2080 -s6 -m 5 ip.sb 2>/dev/null)
+    local go=$(curl -x socks5h://127.0.0.1:2080 -s -m 5 ipinfo.io/country 2>/dev/null)
+    [[ -n "$i4" ]] && echo -e "IPv4: ${G}$i4${P} (国家: $go)" || echo -e "IPv4: ${R}无${P}"
+    [[ -n "$i6" ]] && echo -e "IPv6: ${G}$i6${P}" || echo -e "IPv6: ${R}无${P}"
+    
+    local lat=$(curl -o /dev/null -s -w "%{time_total}\n" -m 5 -x socks5h://127.0.0.1:2080 https://www.google.com 2>/dev/null)
+    if [[ -n "$lat" && "$lat" != "0.000" ]]; then
+        echo -e "TCP: ${G}连通${P} (Google 延迟: ${lat}秒)"
+    else
+        echo -e "TCP: ${R}失败或超时${P}"
     fi
-    crontab -l > /tmp/bc.cron 2>/dev/null
-    sed -i '/s.sh RenewTLS/d' /tmp/bc.cron
-    crontab /tmp/bc.cron
-    rm -rf "$BP" "$CD" /usr/bin/s /root/s.sh
-    echo -e "${G}卸载完成，系统无残留${P}"
-    exit 0
+
+    if dig @8.8.8.8 google.com +time=3 +short >/dev/null 2>&1; then
+        echo -e "UDP: ${G}连通${P} (DNS解析成功)"
+    else
+        echo -e "UDP: ${Y}未知或失败${P}"
+    fi
+    pause
 }
 
-m() {
-    clear
-    echo -e "${B}=====================================${P}"
-    echo -e "${G}   Sing-box 管理面板${P}"
-    echo -e "${B}=====================================${P}"
-    echo "1. 服务端配置"
-    echo "2. 客户端节点"
-    echo "3. 系统状态"
-    echo "4. 彻底卸载"
-    echo "0. 退出"
-    echo -e "${B}=====================================${P}"
-    read -r -p "选择: " ch
-    case "$ch" in
-        1) ss ;;
-        2) sc ;;
-        3) st ;;
-        4) ua ;;
-        0) exit 0 ;;
-        *) echo -e "${R}错误${P}"; sleep 1; m ;;
-    esac
+ex_c() {
+    mkdir -p "$ND"
+    local fs=("$ND"/*.uri)
+    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
+        echo -e "${Y}暂无保存的节点${P}"; pause; return
+    fi
+    echo -e "${B}--- 导出节点 ---${P}"
+    for i in "${!fs[@]}"; do
+        local na=$(basename "${fs[$i]}" .uri)
+        echo "$((i+1)). $na"
+    done
+    echo "0. 返回"
+    echo -e "${B}----------------${P}"
+    read -r -p "输入数字导出: " sel
+    if [[ "$sel" == "0" ]]; then return; fi
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then
+        echo -e "${R}选错${P}"; sleep 1; ex_c; return
+    fi
+    local f="${fs[$((sel-1))]}"
+    echo -e "\n${G}节点链接:${P}"
+    cat "$f"
+    echo ""
+    pause
 }
 
-m
+rm_c() {
+    mkdir -p "$ND"
+    local fs=("$ND"/*.uri)
+    if [[ ${#fs[@]} -eq 0 || ! -f "${fs[0]}" ]]; then
+        echo -e "${Y}暂无保存的节点${P}"; pause; return
+    fi
+    echo -e "${B}--- 删除节点 ---${P}"
+    for i in "${!fs[@]}"; do
+        local na=$(basename "${fs[$i]}" .uri)
+        echo "$((i+1)). $na"
+    done
+    echo "0. 返回"
+    echo -e "${B}----------------${P}"
+    read -r -p "输入数字删除: " sel
+    if [[ "$sel" == "0" ]]; then return; fi
+    if [[ ! "$sel" =~ ^[0-9]+$ ]] || [ "$sel" -lt 1 ] || [ "$sel" -gt "${#fs[@]}" ]; then
+        echo -e "${R}选择无效${P}"; sleep 1; rm_c; return
+    fi
+    local f="${fs[$((sel-1))]}"
+    local na=$(basename "$f" .uri)
+    rm -f "$f"
+    echo -e "${G}已删除: $na${P}"
+    pause
