@@ -13,7 +13,7 @@ STATE=$SBM_DIR/state.json
 ACME_DIR=$SBM_DIR/acme
 PKG_LOG=$SBM_DIR/apt_installed
 SELF=/root/s.sh
-SHORTCUT=/usr/local/bin/s
+SHORTCUT=/usr/bin/s
 CORE=/usr/local/bin/sing-box
 SERVICE_UNIT=/etc/systemd/system/sing-box.service
 DROPIN_DIR=/etc/systemd/system/sing-box.service.d
@@ -411,7 +411,7 @@ validate_port(){
 prompt_port(){
   local proto=$1 port
   while :; do
-    port=$(prompt "端口，0 取消" "$(random_port)")
+    port=$(prompt "端口" "$(random_port)")
     [ "$port" = 0 ] && return 1
     validate_port "$port" "$proto" && { printf '%s' "$port"; return 0; }
   done
@@ -462,11 +462,11 @@ setup_certificate(){
   tell "该协议需要域名证书"
   domain=$(prompt "域名，留空取消" "$suggest"); [ -n "$domain" ] || return 1
   email=$(prompt "ACME 通知邮箱"); [ -n "$email" ] || return 1
-  tell "1) HTTP-01      占用 80"
-  tell "2) TLS-ALPN-01  占用 443"
-  tell "3) DNS-01       Cloudflare"
-  tell "4) DNS-01       阿里云 DNS"
-  tell "5) DNS-01       ACME-DNS"
+  tell " 1. HTTP-01      占用 80"
+  tell " 2. TLS-ALPN-01  占用 443"
+  tell " 3. DNS-01       Cloudflare"
+  tell " 4. DNS-01       阿里云 DNS"
+  tell " 5. DNS-01       ACME-DNS"
   case $(prompt "验证方式" 1) in
     2) mode=alpn ;;
     3) mode=dns_cloudflare; state_set cf_token "$(prompt 'Cloudflare API Token')" ;;
@@ -506,7 +506,7 @@ save_node(){
 create_vless_reality(){
   local name port uuid target keypair private public short_id tag body
   clear; tell "== 新建 VLESS REALITY =="
-  name=$(prompt "节点名称，0 取消" reality); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" reality); [ "$name" = 0 ] && return
   port=$(prompt_port t) || return
   uuid=$(prompt UUID "$(random_uuid)")
   while :; do
@@ -536,7 +536,7 @@ create_vless_tls(){
   local name port uuid tag body
   clear; tell "== 新建 VLESS Vision + TCP + TLS =="
   setup_certificate || return
-  name=$(prompt "节点名称，0 取消" vless-tls); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" vless-tls); [ "$name" = 0 ] && return
   port=$(prompt_port t) || return
   uuid=$(prompt UUID "$(random_uuid)")
   tag=$(unique_tag "$name" in- "$NODE_DIR")
@@ -552,7 +552,7 @@ create_hysteria2(){
   local name port password hopping tag body
   clear; tell "== 新建 Hysteria2 =="
   setup_certificate || return
-  name=$(prompt "节点名称，0 取消" hysteria2); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" hysteria2); [ "$name" = 0 ] && return
   port=$(prompt_port u) || return
   password=$(prompt 密码 "$(random_password)")
   hopping=""
@@ -581,7 +581,7 @@ create_tuic(){
   local name port uuid password tag body
   clear; tell "== 新建 TUIC =="
   setup_certificate || return
-  name=$(prompt "节点名称，0 取消" tuic); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" tuic); [ "$name" = 0 ] && return
   port=$(prompt_port u) || return
   uuid=$(prompt UUID "$(random_uuid)")
   password=$(prompt 密码 "$(random_password)")
@@ -599,7 +599,7 @@ create_trojan(){
   local name port password tag body
   clear; tell "== 新建 Trojan =="
   setup_certificate || return
-  name=$(prompt "节点名称，0 取消" trojan); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" trojan); [ "$name" = 0 ] && return
   port=$(prompt_port t) || return
   password=$(prompt 密码 "$(random_password)")
   tag=$(unique_tag "$name" in- "$NODE_DIR")
@@ -615,7 +615,7 @@ create_anytls(){
   local name port password tag body
   clear; tell "== 新建 AnyTLS =="
   setup_certificate || return
-  name=$(prompt "节点名称，0 取消" anytls); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" anytls); [ "$name" = 0 ] && return
   port=$(prompt_port t) || return
   password=$(prompt 密码 "$(random_password)")
   tag=$(unique_tag "$name" in- "$NODE_DIR")
@@ -631,7 +631,7 @@ create_socks(){
   local name username password port tag body
   clear; tell "== 新建 SOCKS5 =="
   tell_warn "无加密无伪装，公网监听可能被扫描滥用"
-  name=$(prompt "节点名称，0 取消" socks5); [ "$name" = 0 ] && return
+  name=$(prompt "节点名称" socks5); [ "$name" = 0 ] && return
   username=$(prompt 账号 user)
   password=$(prompt 密码 "$(random_password)")
   [ -n "$username" ] && [ -n "$password" ] || { tell_warn "账号密码不能为空"; wait_key; return; }
@@ -688,7 +688,7 @@ list_nodes(){
   for file in "$NODE_DIR"/*.json; do
     index=$((index+1)); NODE_FILES+=("$file")
     [ "$(jq -r .proto "$file")" = u ] && proto=udp || proto=tcp
-    tell "$(printf '%2d) %-16s %-14s %s/%s' "$index" "$(jq -r .name "$file")" \
+    tell "$(printf '%2d. %-16s %-14s %s/%s' "$index" "$(jq -r .name "$file")" \
       "$(jq -r .kind "$file")" "$(jq -r .port "$file")" "$proto")"
   done
   [ "$index" = 0 ] && tell " 暂无节点"
@@ -696,7 +696,7 @@ list_nodes(){
 }
 select_node(){
   local index
-  list_nodes; tell " 0) 返回主菜单"
+  list_nodes; tell " 0. 返回主菜单"
   [ ${#NODE_FILES[@]} = 0 ] && { wait_key; return 1; }
   index=$(prompt 序号)
   [ -z "$index" ] && return 1
@@ -710,14 +710,15 @@ select_node(){
 menu_create_protocol(){
   clear
   tell "== 创建协议 =="
-  tell " 1) VLESS  REALITY"
-  tell " 2) VLESS  Vision + TCP + TLS"
-  tell " 3) Hysteria2"
-  tell " 4) TUIC"
-  tell " 5) Trojan"
-  tell " 6) AnyTLS"
-  tell " 7) SOCKS5"
-  tell " 0) 返回主菜单"
+  tell " (提示：在任意要求输入的环节输入 0 并回车，即可取消操作)"
+  tell " 1. VLESS  REALITY"
+  tell " 2. VLESS  Vision + TCP + TLS"
+  tell " 3. Hysteria2"
+  tell " 4. TUIC"
+  tell " 5. Trojan"
+  tell " 6. AnyTLS"
+  tell " 7. SOCKS5"
+  tell " 0. 返回主菜单"
   case $(prompt 选择) in
     1) create_vless_reality ;;
     2) create_vless_tls ;;
@@ -734,6 +735,16 @@ menu_delete_protocol(){
   select_node || return
   prompt_yes "删除 $(jq -r .name "$PICKED")" || return
   rm -f "$PICKED"
+  
+  local file has_acme=0
+  for file in "$NODE_DIR"/*.json; do
+    [ "$(jq -r .tls_mode "$file")" = acme ] && has_acme=1
+  done
+  if [ "$has_acme" = 0 ]; then
+    state_set domain ""
+    state_set email ""
+  fi
+
   apply_config && out_ok "已删除"
   render_wait
 }
@@ -744,16 +755,16 @@ menu_modify_protocol(){
   kind=$(jq -r .kind "$PICKED")
   clear
   tell "== $(jq -r .name "$PICKED")  [$kind] =="
-  tell " 1) 名称"
-  tell " 2) 端口"
+  tell " 1. 名称"
+  tell " 2. 端口"
   case $kind in
-    vless-reality|vless-tls) tell " 3) UUID" ;;
-    socks) tell " 3) 密码"; tell " 4) 账号" ;;
-    *) tell " 3) 密码" ;;
+    vless-reality|vless-tls) tell " 3. UUID" ;;
+    socks) tell " 3. 密码"; tell " 4. 账号" ;;
+    *) tell " 3. 密码" ;;
   esac
-  [ "$kind" = vless-reality ] && tell " 5) 握手目标域名"
-  [ "$kind" = hysteria2 ] && tell " 6) 端口跳跃"
-  tell " 0) 返回主菜单"
+  [ "$kind" = vless-reality ] && tell " 5. 握手目标域名"
+  [ "$kind" = hysteria2 ] && tell " 6. 端口跳跃"
+  tell " 0. 返回主菜单"
   case $(prompt 选择) in
     1)
       value=$(prompt "新名称"); [ -n "$value" ] || return
@@ -815,13 +826,12 @@ render_certificate_status(){
   days=$(( ( $(date -d "$expiry" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
   out "到期时间 $expiry    剩余 ${days} 天"
   systemctl is-active --quiet sing-box || out_warn "服务未运行，自动续期不会执行"
-}
+}}
 menu_server_info(){
   local file port proto status count=0 tcp_list udp_list
   tcp_list=$(listening_ports t); udp_list=$(listening_ports u)
   out "== 服务端信息 =="
   systemctl is-active --quiet sing-box && out_ok "sing-box 运行中" || out_warn "sing-box 未运行"
-  out "当前出口 $(exit_label)"
   for file in "$NODE_DIR"/*.json; do
     count=$((count+1))
     port=$(jq -r .port "$file"); proto=$(jq -r .proto "$file")
@@ -840,7 +850,7 @@ menu_server_info(){
 }
 menu_change_domain(){
   local new_domain old_domain old_email old_challenge file count=0
-  clear; tell "== 更换域名 =="
+  clear; tell "== 更换 TLS 域名 =="
   old_domain=$(state_get domain); old_email=$(state_get email); old_challenge=$(state_get challenge)
   tell "当前证书域名 ${old_domain:-未设置}"
   tell "使用该域名的协议:"
@@ -870,28 +880,67 @@ menu_change_domain(){
     apply_config_quiet; render_wait
   fi
 }
+menu_change_reality_domain(){
+  local file count=0 picked value
+  clear; tell "== 更换 REALITY 域名 =="
+  for file in "$NODE_DIR"/*.json; do
+    [ -f "$file" ] || continue
+    if [ "$(jq -r .kind "$file")" = vless-reality ]; then
+      count=$((count+1))
+      picked=$file
+    fi
+  done
+  
+  if [ "$count" = 0 ]; then
+    tell_warn "当前未创建任何 REALITY 节点"
+    wait_key; return
+  fi
+  
+  if [ "$count" -gt 1 ]; then
+    tell "请选择要更换域名的 REALITY 节点:"
+    select_node || return
+    picked=$PICKED
+  fi
+  
+  tell "当前 REALITY 域名: $(jq -r .meta.target "$picked")"
+  while :; do
+    value=$(prompt "新握手目标域名 (留空取消)"); [ -n "$value" ] || return
+    probe_handshake_target "$value" && break
+    prompt_yes "仍然使用" && break
+  done
+  
+  json_edit "$picked" '.meta.target=$v|.inbound.tls.server_name=$v|.inbound.tls.reality.handshake.server=$v' \
+    --arg v "$value" || { tell_warn 修改失败; wait_key; return; }
+    
+  if apply_config; then
+    out_ok "REALITY 域名已更换"; out_gap; render_share_uri "$picked"
+  fi
+  render_wait
+}
 menu_server(){
   while :; do
     [ "$RETURN_MAIN" = 1 ] && return
     clear
     tell "== 服务端管理 =="
-    tell " 1) 创建协议"
-    tell " 2) 删除协议"
-    tell " 3) 修改配置"
-    tell " 4) 服务端信息"
-    tell " 5) 更换域名"
-    tell " 6) 重启服务"
-    tell " 7) 停止服务"
-    tell " 0) 返回主菜单"
+    tell " 1. 创建协议"
+    tell " 2. 删除协议"
+    tell " 3. 修改配置"
+    tell " 4. 服务端信息"
+    tell " 5. 更换 TLS 域名"
+    tell " 6. 更换 REALITY 域名"
+    tell " 7. 重启服务"
+    tell " 8. 停止服务"
+    tell " 0. 返回主菜单"
     case $(prompt 选择) in
       1) menu_create_protocol ;;
       2) menu_delete_protocol ;;
       3) menu_modify_protocol ;;
       4) menu_server_info ;;
       5) menu_change_domain ;;
-      6) if systemctl restart sing-box; then sync_bypass_rules; sync_hopping_rules; tell_ok 已重启
+      6) menu_change_reality_domain ;;
+      7) if systemctl restart sing-box; then sync_bypass_rules; sync_hopping_rules; tell_ok 已重启
          else tell_warn 重启失败; fi; wait_key ;;
-      7) systemctl stop sing-box && tell_ok 已停止 || tell_warn 停止失败; wait_key ;;
+      8) systemctl stop sing-box && tell_ok 已停止 || tell_warn 停止失败; wait_key ;;
       0) return ;;
     esac
   done
@@ -1005,7 +1054,7 @@ uri_to_outbound(){
 peer_add(){
   local name uri tag outbound probe ipv4 ipv6 domain port
   clear; tell "== 添加节点 =="
-  name=$(prompt "节点名称，留空取消"); [ -n "$name" ] || return
+  name=$(prompt "节点名称 (留空取消)"); [ -n "$name" ] || return
   uri=$(prompt "节点链接"); [ -n "$uri" ] || return
   parse_uri "$uri"
   ipv4=$(local_ipv4); ipv6=$(local_ipv6); domain=$(state_get domain)
@@ -1041,14 +1090,14 @@ list_peers(){
   for file in "$PEER_DIR"/*.json; do
     index=$((index+1)); PEER_FILES+=("$file")
     [ "$(jq -r .tag "$file")" = "$current" ] && mark="<= 使用中" || mark=""
-    tell "$(printf '%2d) %-20s %-10s %s' "$index" "$(jq -r .name "$file")" \
+    tell "$(printf '%2d. %-20s %-10s %s' "$index" "$(jq -r .name "$file")" \
       "$(jq -r .outbound.type "$file")" "$mark")"
   done
   [ "$index" = 0 ] && tell " 暂无节点"
 }
 select_peer(){
   local index
-  list_peers; tell " 0) 返回主菜单"
+  list_peers; tell " 0. 返回主菜单"
   [ ${#PEER_FILES[@]} = 0 ] && { wait_key; return 1; }
   index=$(prompt 序号)
   [ -z "$index" ] && return 1
@@ -1164,12 +1213,12 @@ menu_client(){
     clear
     tell "== 客户端管理 =="
     tell "当前出口 $(exit_label)"
-    tell " 1) 添加节点"
-    tell " 2) 节点选择"
-    tell " 3) 删除节点"
-    tell " 4) 停止代理"
-    tell " 5) 客户端状态"
-    tell " 0) 返回主菜单"
+    tell " 1. 添加节点"
+    tell " 2. 节点选择"
+    tell " 3. 删除节点"
+    tell " 4. 停止代理"
+    tell " 5. 客户端状态"
+    tell " 0. 返回主菜单"
     case $(prompt 选择) in
       1) peer_add ;;
       2) peer_select ;;
@@ -1227,9 +1276,9 @@ wg_setup(){
   local listen_port peer_host peer_port peer_key body
   clear
   tell "== 初始化 WireGuard =="
-  tell " 1) 出口端    本机被动监听，流量在本机出网"
-  tell " 2) 接入端    本机出站经隧道送至出口端"
-  tell " 0) 返回主菜单"
+  tell " 1. 出口端    本机被动监听，流量在本机出网"
+  tell " 2. 接入端    本机出站经隧道送至出口端"
+  tell " 0. 返回主菜单"
   case $(prompt "本机角色") in
     1) role=server ;;
     2) role=client ;;
@@ -1249,7 +1298,7 @@ wg_setup(){
     address4="$prefix.1/24"; address6="fd00:7::1/64"
     peer_ip4="$prefix.2"; peer_ip6="fd00:7::2"
     while :; do
-      listen_port=$(prompt "监听端口，0 取消" "$(random_port)")
+      listen_port=$(prompt "监听端口 (0取消)" "$(random_port)")
       [ "$listen_port" = 0 ] && return
       validate_port "$listen_port" u && break
     done
@@ -1338,12 +1387,12 @@ menu_wireguard(){
     else
       tell "尚未初始化"
     fi
-    tell " 1) 初始化或重建本机配置"
-    tell " 2) 回填对端公钥"
-    tell " 3) 启用或关闭隧道"
-    tell " 4) 查看密钥与隧道信息"
-    tell " 5) 删除配置"
-    tell " 0) 返回主菜单"
+    tell " 1. 初始化或重建本机配置"
+    tell " 2. 回填对端公钥"
+    tell " 3. 启用或关闭隧道"
+    tell " 4. 查看密钥与隧道信息"
+    tell " 5. 删除配置"
+    tell " 0. 返回主菜单"
     case $(prompt 选择) in
       1) wg_setup ;;
       2) wg_fill_peer_key ;;
@@ -1363,18 +1412,40 @@ menu_wireguard(){
   done
 }
 
-render_system_info(){
-  local ipv6
-  ipv6=$(local_ipv6)
-  out "== 状态与更新 =="
-  out "系统     $(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release)"
-  out "内核     $(uname -r)"
-  out "架构     $(uname -m)"
-  out "CPU      $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')  x$(nproc)"
-  out "内存     $(awk '/MemTotal/{total=$2}/MemAvailable/{avail=$2}END{printf "%d / %d MB",(total-avail)/1024,total/1024}' /proc/meminfo)"
-  out "sing-box $(core_version)   $(state_get asset)"
-  out "本机地址 $(local_ipv4)${ipv6:+   $ipv6}"
-  systemctl is-active --quiet sing-box && out "服务     运行中" || out "服务     已停止"
+render_system_info_direct(){
+  local trace4 trace6 ip4 ip6 loc4 loc6
+  tell "== 状态与更新 =="
+  tell "系统:     $(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release)"
+  tell "内核:     $(uname -r)"
+  tell "架构:     $(uname -m)"
+  tell "CPU:      $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')  x$(nproc)"
+  tell "内存:     $(awk '/MemTotal/{total=$2}/MemAvailable/{avail=$2}END{printf "%d / %d MB",(total-avail)/1024,total/1024}' /proc/meminfo)"
+  tell "sing-box: $(core_version)   $(state_get asset)"
+  if systemctl is-active --quiet sing-box; then
+    tell "服务状态: 运行中"
+  else
+    tell "服务状态: 已停止"
+  fi
+  tell ""
+  
+  trace4=$(curl -s4 --connect-timeout 4 -m 8 "$TRACE_URL" 2>/dev/null)
+  if [ -n "$trace4" ]; then
+    ip4=$(sed -n 's/^ip=//p' <<<"$trace4")
+    loc4=$(sed -n 's/^loc=//p' <<<"$trace4")
+    printf '  IPv4 出口: %s \033[32m√\033[0m  [%s]\n' "$ip4" "$loc4" >&2
+  else
+    printf '  IPv4 出口: \033[31mx\033[0m 未连通\n' >&2
+  fi
+
+  trace6=$(curl -s6 --connect-timeout 4 -m 8 "$TRACE_URL" 2>/dev/null)
+  if [ -n "$trace6" ]; then
+    ip6=$(sed -n 's/^ip=//p' <<<"$trace6")
+    loc6=$(sed -n 's/^loc=//p' <<<"$trace6")
+    printf '  IPv6 出口: %s \033[32m√\033[0m  [%s]\n' "$ip6" "$loc6" >&2
+  else
+    printf '  IPv6 出口: \033[31mx\033[0m 未连通\n' >&2
+  fi
+  tell ""
 }
 run_update(){
   local current latest
@@ -1421,12 +1492,11 @@ run_uninstall(){
 menu_status(){
   while :; do
     [ "$RETURN_MAIN" = 1 ] && return
-    render_system_info
-    out_gap
-    out " 1) 检测更新"
-    out " 2) 卸载"
-    out " 0) 返回主菜单"
-    render
+    clear
+    render_system_info_direct
+    tell " 1. 检测更新"
+    tell " 2. 卸载"
+    tell " 0. 返回主菜单"
     case $(prompt 选择) in
       1) run_update ;;
       2) run_uninstall ;;
@@ -1440,6 +1510,8 @@ bootstrap(){
   check_dependencies
   if [ -f "$0" ] && [ "$(readlink -f "$0")" != "$SELF" ]; then install -m700 "$0" "$SELF"; fi
   [ -f "$SELF" ] && ln -sf "$SELF" "$SHORTCUT"
+  grep -qx "alias s='/root/s.sh'" ~/.bashrc 2>/dev/null || echo "alias s='/root/s.sh'" >> ~/.bashrc
+  
   if [ ! -x "$CORE" ]; then
     echo "  首次运行，正在安装 sing-box"
     install_core || exit 1
@@ -1463,11 +1535,11 @@ while :; do
   tell "================================"
   tell "      sing-box 管理脚本   s"
   tell "================================"
-  tell " 1) 服务端管理"
-  tell " 2) 客户端管理"
-  tell " 3) WireGuard 管理"
-  tell " 4) 状态与更新"
-  tell " 0) 退出"
+  tell " 1. 服务端管理"
+  tell " 2. 客户端管理"
+  tell " 3. WireGuard 管理"
+  tell " 4. 状态与更新"
+  tell " 0. 退出"
   case $(prompt 选择) in
     1) menu_server ;;
     2) menu_client ;;
