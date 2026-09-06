@@ -743,7 +743,7 @@ menu_create_protocol(){
   clear
   tell "${CYAN}========== 创建协议 ==========${PLAIN}"
   tell "  1. VLESS REALITY"
-  tell "  2. VLESS Vision + TCP + TLS"
+  tell "  2. VLESS Vision+TCP+TLS"
   tell "  3. Hysteria2"
   tell "  4. TUIC"
   tell "  5. Trojan"
@@ -1447,7 +1447,7 @@ menu_wireguard(){
       [ "$(jq -r .enabled "$WG_CONF")" = true ] && tunnel_label="${GREEN}运行中${PLAIN}" || tunnel_label="${RED}已挂起${PLAIN}"
       tell "  角色: ${role_label} | 隧道: ${tunnel_label}"
     else
-      tell "  暂无记录"
+      tell "  未配置"
     fi
     tell ""
     tell "  1. 初始化配置"
@@ -1546,7 +1546,7 @@ menu_status(){
     tell "  内存状态: ${mem}"
     tell "  运行时间: ${up:-未知}"
     tell "  singbox : ${s_state}"
-    tell "  引擎版本: ${sb_ver:-无} (${sb_asset:-未知})"
+    tell "  singbox版本: ${sb_ver:-无} (${sb_asset:-未知})"
     tell ""
     render_client_ip_status
     tell ""
