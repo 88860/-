@@ -38,6 +38,11 @@ PICKED=""
 CORE_VERSION=""
 CORE_TAGS=""
 
+IP_INFO_IP=""
+IP_INFO_C=""
+IP_INFO_ASN=""
+IP_INFO_NAME=""
+
 [ "$(id -u)" = 0 ] || { echo -e "${RED}[×] 权限不足: 请使用 root 用户运行${PLAIN}"; exit 1; }
 
 read_line(){
@@ -92,11 +97,13 @@ json_write(){
   [ -s "$tmp" ] || { rm -f "$tmp"; return 1; }
   install -m600 "$tmp" "$dest"; rm -f "$tmp"
 }
+
 json_save(){
   local dest=$1 content=$2
   [ -n "$content" ] || return 1
   printf '%s\n' "$content" | json_write "$dest"
 }
+
 json_edit(){
   local file=$1 expr=$2; shift 2
   local tmp; tmp=$(mktemp) || return 1
@@ -112,6 +119,7 @@ init_dirs(){
   [ -f "$STATE" ] || printf '%s\n' '{"exit":"direct","domain":"","email":"","challenge":"http","asset":""}' | json_write "$STATE"
   [ -f "$PKG_LOG" ] || : >"$PKG_LOG"
 }
+
 state_get(){ jq -r --arg k "$1" '.[$k]//""' "$STATE" 2>/dev/null; }
 state_set(){ json_edit "$STATE" '.[$k]=$v' --arg k "$1" --arg v "$2"; }
 
@@ -122,6 +130,7 @@ ensure_command(){
   command -v "$cmd" >/dev/null 2>&1 || return 1
   grep -qx "$pkg" "$PKG_LOG" 2>/dev/null || echo "$pkg" >>"$PKG_LOG"
 }
+
 check_dependencies(){
   local cmd missing=0
   for cmd in curl tar jq openssl nft ss ip ping; do
@@ -161,6 +170,7 @@ asset_candidates(){
     mipsel) printf '%s\n' linux-mipsle ;;
   esac
 }
+
 release_json(){ curl -fsSL -m 15 "$GH_API/releases/latest" 2>/dev/null; }
 remote_version(){ release_json | jq -r '.tag_name//""' | sed 's/^v//'; }
 
@@ -171,7 +181,7 @@ resolve_addresses(){ getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u
 install_core(){
   local json url asset candidate tmp found
   json=$(release_json)
-  [ -n "$json" ] || { tell_warn "获取版本信息失败"; return 1; }
+  [ -n "$json" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
   for candidate in $(asset_candidates); do
     url=$(jq -r --arg s "$candidate.tar.gz" '.assets[]?|select(.name|endswith($s))|.browser_download_url' <<<"$json" | head -1)
     [ -n "$url" ] && { asset=$candidate; break; }
@@ -249,6 +259,7 @@ sync_bypass_rules(){
     ip -6 rule add pref "$BYPASS_PREF" sport "$port" lookup main 2>/dev/null
   done
 }
+
 bypass_rules_present(){ [ -n "$(ip rule show pref "$BYPASS_PREF" 2>/dev/null)" ]; }
 
 sync_hopping_rules(){
@@ -260,6 +271,7 @@ sync_hopping_rules(){
   nft add chain inet "$HOP_TABLE" prerouting '{ type nat hook prerouting priority dstnat; policy accept; }' 2>/dev/null
   nft add rule inet "$HOP_TABLE" prerouting iifname != lo udp dport "$range" redirect to :"$port" 2>/dev/null
 }
+
 clear_hopping_rules(){ nft delete table inet "$HOP_TABLE" 2>/dev/null; }
 
 acme_options(){
@@ -364,7 +376,7 @@ apply_config(){
     rm -f "$tmp"; return 1
   fi
   install -m600 "$tmp" "$CONFIG"; rm -f "$tmp"
-  systemctl restart sing-box 2>/dev/null
+  systemctl restart sing-box >/dev/null 2>&1
   sleep 2
   if ! systemctl is-active --quiet sing-box; then
     out_warn "服务启动异常:"
@@ -718,7 +730,7 @@ select_node(){
   local index
   list_nodes; tell "  0. 返回"
   [ ${#NODE_FILES[@]} = 0 ] && { wait_key; return 1; }
-  index=$(prompt "请选择")
+  index=$(prompt "请输入序号")
   [ -z "$index" ] && return 1
   [ "$index" = 0 ] && return 1
   [[ $index =~ ^[0-9]+$ ]] && [ "$index" -ge 1 ] && [ "$index" -le ${#NODE_FILES[@]} ] \
@@ -829,7 +841,7 @@ menu_modify_protocol(){
         value=$(prompt "新握手目标域名 (留空取消)")
         [ -n "$value" ] || return
         probe_handshake_target "$value" && break
-        prompt_yes "检测异常，强行加载" && break
+        prompt_yes "检测异常，强制加载" && break
       done
       json_edit "$PICKED" '.meta.target=$v|.inbound.tls.server_name=$v|.inbound.tls.reality.handshake.server=$v' \
         --arg v "$value" || { tell_warn 失败; wait_key; return; } ;;
@@ -877,21 +889,21 @@ menu_server_info(){
   tcp_list=$(listening_ports t); udp_list=$(listening_ports u)
   clear
   tell "${CYAN}========== 服务端信息 ==========${PLAIN}"
-  systemctl is-active --quiet sing-box && tell_ok "引擎: 运行中" || tell_warn "引擎: 已停止"
-  tell "  当前出口: $(exit_label)"
+  systemctl is-active --quiet sing-box && tell_ok "singbox: 运行中" || tell_warn "singbox: 未运行"
+  
   for file in "$NODE_DIR"/*.json; do
     count=$((count+1))
     port=$(jq -r .port "$file"); proto=$(jq -r .proto "$file")
     if [ "$proto" = u ]; then
-      grep -qx "$port" <<<"$udp_list" && status="${GREEN}监听中${PLAIN}" || status="${RED}无响应${PLAIN}"
+      grep -qx "$port" <<<"$udp_list" && status="${GREEN}正常监听${PLAIN}" || status="${RED}未在监听${PLAIN}"
     else
-      grep -qx "$port" <<<"$tcp_list" && status="${GREEN}监听中${PLAIN}" || status="${RED}无响应${PLAIN}"
+      grep -qx "$port" <<<"$tcp_list" && status="${GREEN}正常监听${PLAIN}" || status="${RED}未在监听${PLAIN}"
     fi
     tell ""
     tell "── $(jq -r .name "$file") [$(jq -r .kind "$file")] | 端口 $port $status"
     render_share_uri "$file"
   done
-  [ "$count" = 0 ] && tell "\n  暂无节点"
+  [ "$count" = 0 ] && tell "\n  暂无搭建好的节点"
   render_certificate_status
   wait_key
 }
@@ -955,7 +967,18 @@ menu_server(){
       3) menu_modify_protocol ;;
       4) menu_server_info ;;
       5) menu_change_domain ;;
-      6) if systemctl restart sing-box; then sync_bypass_rules; sync_hopping_rules; tell_ok "已重启"; else tell_warn "重启失败"; fi; wait_key ;;
+      6) 
+         systemctl restart sing-box >/dev/null 2>&1
+         if systemctl is-active --quiet sing-box; then
+           sync_bypass_rules
+           sync_hopping_rules
+           tell_ok "已重启"
+         else
+           tell_warn "singbox 未运行"
+           tell_warn "重启失败"
+         fi
+         wait_key
+         ;;
       7) if systemctl stop sing-box; then tell_ok "已停止"; else tell_warn "操作异常"; fi; wait_key ;;
       0) break ;;
     esac
@@ -1174,7 +1197,70 @@ exit_label(){
   esac
 }
 
+get_ip_info(){
+  local mode=$1
+  local res ip country asn name org
+  
+  res=$(curl -s$mode -m 3 https://api.ip.sb/geoip 2>/dev/null)
+  ip=$(jq -r '.ip // empty' <<<"$res" 2>/dev/null)
+  
+  if [ -n "$ip" ]; then
+    country=$(jq -r '.country_code // empty' <<<"$res")
+    asn=$(jq -r '.asn // empty' <<<"$res")
+    name=$(jq -r '.organization // empty' <<<"$res")
+    
+    IP_INFO_IP="$ip"
+    IP_INFO_C=$(echo "$country" | tr 'A-Z' 'a-z')
+    IP_INFO_ASN="$asn"
+    IP_INFO_NAME="$name"
+    return
+  fi
+  
+  res=$(curl -s$mode -m 3 https://ipinfo.io/json 2>/dev/null)
+  ip=$(jq -r '.ip // empty' <<<"$res" 2>/dev/null)
+  
+  if [ -n "$ip" ]; then
+    country=$(jq -r '.country // empty' <<<"$res")
+    org=$(jq -r '.org // empty' <<<"$res")
+    asn=$(echo "$org" | awk '{print $1}' | sed 's/AS//')
+    name=$(echo "$org" | cut -d' ' -f2-)
+    
+    IP_INFO_IP="$ip"
+    IP_INFO_C=$(echo "$country" | tr 'A-Z' 'a-z')
+    IP_INFO_ASN="$asn"
+    IP_INFO_NAME="$name"
+    return
+  fi
+  
+  IP_INFO_IP=""
+  IP_INFO_C=""
+  IP_INFO_ASN=""
+  IP_INFO_NAME=""
+}
+
 render_client_ip_status() {
+  get_ip_info 4
+  if [ -n "$IP_INFO_IP" ]; then
+    tell "  IPv4: ${IP_INFO_C} ${IP_INFO_IP}"
+    tell "  ${IP_INFO_NAME}  ASN: ${IP_INFO_ASN}"
+  else
+    tell "  IPv4: 无或不可用"
+    tell "  -  ASN: -"
+  fi
+  
+  get_ip_info 6
+  if [ -n "$IP_INFO_IP" ]; then
+    tell "  IPv6: ${IP_INFO_C} ${IP_INFO_IP}"
+    tell "  ${IP_INFO_NAME}  ASN: ${IP_INFO_ASN}"
+  else
+    tell "  IPv6: 无或不可用"
+    tell "  -  ASN: -"
+  fi
+}
+
+menu_client_status(){
+  clear
+  tell "${CYAN}========== 客户端状态 ==========${PLAIN}"
   local exit_node=$(state_get exit)
   local proxy_name="直连"
   if [ "$exit_node" != "direct" ]; then
@@ -1184,44 +1270,8 @@ render_client_ip_status() {
       proxy_name="$(jq -r .outbound.type "$PEER_DIR/$exit_node.json" 2>/dev/null || echo '未知')"
     fi
   fi
-  
   tell "  当前出口: ${CYAN}${proxy_name}${PLAIN}"
   tell ""
-  
-  local ip4 loc4 ip6 loc6 res4 res6
-  
-  res4=$(curl -s4 -m 3 http://ip-api.com/json/?lang=zh-CN 2>/dev/null)
-  if [ "$(jq -r '.status' <<<"$res4")" = "success" ]; then
-    ip4=$(jq -r '.query' <<<"$res4")
-    loc4=$(jq -r '.country' <<<"$res4")
-  else
-    ip4=$(curl -s4 -m 3 ip.sb 2>/dev/null)
-  fi
-  
-  res6=$(curl -s6 -m 3 http://ip-api.com/json/?lang=zh-CN 2>/dev/null)
-  if [ "$(jq -r '.status' <<<"$res6")" = "success" ]; then
-    ip6=$(jq -r '.query' <<<"$res6")
-    loc6=$(jq -r '.country' <<<"$res6")
-  else
-    ip6=$(curl -s6 -m 3 ip.sb 2>/dev/null)
-  fi
-  
-  if [ -n "$ip4" ]; then
-    tell "  IPv4 地址: ${ip4} ${loc4:+"($loc4)"}"
-  else
-    tell "  IPv4 地址: 无或不可用"
-  fi
-  
-  if [ -n "$ip6" ]; then
-    tell "  IPv6 地址: ${ip6} ${loc6:+"($loc6)"}"
-  else
-    tell "  IPv6 地址: 无或不可用"
-  fi
-}
-
-menu_client_status(){
-  clear
-  tell "${CYAN}========== 客户端状态 ==========${PLAIN}"
   render_client_ip_status
   wait_key
 }
@@ -1437,150 +1487,3 @@ menu_wireguard(){
            wait_key
          fi ;;
       0) break ;;
-    esac
-  done
-}
-
-run_update(){
-  local current latest
-  clear
-  current=$(core_version); latest=$(remote_version)
-  tell "本地版本: $current"
-  tell "最新版本: ${latest:-获取超时}"
-  [ -n "$latest" ] || { wait_key; return; }
-  [ "$current" = "$latest" ] && { tell_ok "已是最新"; wait_key; return; }
-  prompt_yes "更新到 $latest" || return
-  install_core && apply_config && tell_ok "更新完成"
-  wait_key
-}
-
-run_uninstall(){
-  local packages guard=0
-  clear
-  tell_warn "警告: 卸载将清空所有配置"
-  [ "$(prompt '输入 yes 确认')" = yes ] || return
-  mapfile -t packages < <(grep -v '^[[:space:]]*$' "$PKG_LOG" 2>/dev/null)
-  
-  systemctl disable --now sing-box 2>/dev/null
-  systemctl stop sbm-watchdog.timer sbm-watchdog.service 2>/dev/null
-  systemctl reset-failed 'sbm-watchdog*' 2>/dev/null
-  
-  rm -f "$SERVICE_UNIT" "$DROPIN"
-  rm -f /etc/systemd/system/sbm-watchdog.*
-  rm -f /run/systemd/transient/sbm-watchdog.* 2>/dev/null
-  rmdir "$DROPIN_DIR" 2>/dev/null
-  systemctl daemon-reload
-  
-  clear_hopping_rules
-  while ip rule del pref "$BYPASS_PREF" 2>/dev/null; do guard=$((guard+1)); [ "$guard" -gt 64 ] && break; done
-  guard=0
-  while ip -6 rule del pref "$BYPASS_PREF" 2>/dev/null; do guard=$((guard+1)); [ "$guard" -gt 64 ] && break; done
-  ip link del "$WG_IF" 2>/dev/null
-  ip link del "$TUN_IF" 2>/dev/null
-  
-  rm -rf "$SB_DIR" "$SBM_DIR" /var/lib/sing-box "$CORE" "$SHORTCUT"
-  
-  if [ ${#packages[@]} -gt 0 ]; then
-    tell "脚本曾安装过: [ ${packages[*]} ]"
-    if prompt_yes "是否剥离依赖"; then
-      DEBIAN_FRONTEND=noninteractive apt-get purge -y -q "${packages[@]}" >/dev/null 2>&1
-      apt-get autoremove -y -q >/dev/null 2>&1
-    fi
-  fi
-  rm -f "$SELF"
-  tell_ok "清理完成"
-  exit 0
-}
-
-menu_status(){
-  while :; do
-    clear
-    tell "${CYAN}========== 状态与更新 ==========${PLAIN}"
-    local os=$(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release)
-    local core=$(uname -r)
-    local arch=$(uname -m)
-    local mem=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}/MemFree/{f=$2}/Buffers/{b=$2}/^Cached/{c=$2}END{if(a=="")a=f+b+c; printf "%d / %d MB",(t-a)/1024,t/1024}' /proc/meminfo)
-    local up=$(uptime -p 2>/dev/null | sed 's/up //;s/days/天/;s/day/天/;s/hours/小时/;s/hour/小时/;s/minutes/分钟/;s/minute/分钟/')
-    local sb_ver=$(core_version)
-    local sb_asset=$(state_get asset)
-    local s_state="${RED}未运行${PLAIN}"
-    systemctl is-active --quiet sing-box && s_state="${GREEN}正常运行${PLAIN}"
-    
-    tell "  系统版本 : ${os}"
-    tell "  内核架构 : ${core} (${arch})"
-    tell "  内存状态 : ${mem}"
-    tell "  运行时间 : ${up:-未知}"
-    tell "  引擎状态 : ${s_state}"
-    tell "  引擎版本 : ${sb_ver:-无} (${sb_asset:-未知})"
-    tell ""
-    render_client_ip_status
-    tell ""
-    tell "  1. 检测更新"
-    tell "  2. 彻底卸载"
-    tell "  0. 返回"
-    tell "${CYAN}================================${PLAIN}"
-    case $(prompt "请选择") in
-      1) run_update ;;
-      2) run_uninstall ;;
-      0) break ;;
-    esac
-  done
-}
-
-bootstrap(){
-  init_dirs
-  check_dependencies
-  local s_path=""
-  if [ -n "${BASH_SOURCE[0]}" ] && [ "${BASH_SOURCE[0]}" != "bash" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    s_path=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null)
-  elif [ -r "$0" ] && [ "$0" != "bash" ] && [ "$0" != "sh" ]; then
-    s_path=$(readlink -f "$0" 2>/dev/null)
-  fi
-  if [ -n "$s_path" ] && [ -f "$s_path" ] && [ "$s_path" != "$SELF" ]; then
-    cp -f "$s_path" "$SELF" 2>/dev/null
-  elif [ -z "$s_path" ] && [ -s /proc/$$/fd/255 ]; then
-    cat /proc/$$/fd/255 > "$SELF" 2>/dev/null
-  fi
-  chmod 700 "$SELF" 2>/dev/null
-  if [ -f "$SELF" ]; then
-    if [ ! -L "$SHORTCUT" ] || [ "$(readlink "$SHORTCUT")" != "$SELF" ]; then
-      ln -sf "$SELF" "$SHORTCUT" 2>/dev/null
-    fi
-  fi
-  if [ ! -x "$CORE" ]; then
-    echo -e "  ${CYAN}核心架构拉取中...${PLAIN}"
-    install_core || exit 1
-    write_service
-    systemctl enable sing-box >/dev/null 2>&1
-  fi
-  [ -f "$SERVICE_UNIT" ] || write_service
-  [ -f "$CONFIG" ] || build_config | json_write "$CONFIG"
-}
-
-case $1 in
-  --sync) init_dirs; sync_bypass_rules; sync_hopping_rules; exit 0 ;;
-  --clear-hopping) clear_hopping_rules; exit 0 ;;
-  --watchdog) run_watchdog ;;
-esac
-
-bootstrap
-
-while :; do
-  clear
-  tell "${CYAN}================================${PLAIN}"
-  tell "${CYAN}       sing-box 管理脚本        ${PLAIN}"
-  tell "${CYAN}================================${PLAIN}"
-  tell "  1. 服务端管理"
-  tell "  2. 客户端管理"
-  tell "  3. WireGuard 管理"
-  tell "  4. 状态与更新"
-  tell "  0. 退出"
-  tell "${CYAN}================================${PLAIN}"
-  case $(prompt "请选择") in
-    1) menu_server ;;
-    2) menu_client ;;
-    3) menu_wireguard ;;
-    4) menu_status ;;
-    0) clear; exit 0 ;;
-  esac
-done
