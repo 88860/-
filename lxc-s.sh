@@ -177,51 +177,80 @@ use_cert_provider(){ version_ge "$(core_version)" 1.14.0; }
 core_cache_reset(){ CORE_VERSION=""; CORE_TAGS=""; }
 
 install_core(){
-  printf '  %b正在拉取 Github 最新版 sing-box...%b\n' "${CYAN}" "${PLAIN}"
-  local version arch url target_dir found proxy real_url success
-  
-  version=$(curl -sI "https://mirror.ghproxy.com/https://github.com/SagerNet/sing-box/releases/latest" | grep -i "^location:" | sed -E 's/.*\/tag\/v([^[:space:]\r\n]+).*/\1/')
-  [ -n "$version" ] || version=$(curl -sI "https://github.com/SagerNet/sing-box/releases/latest" | grep -i "^location:" | sed -E 's/.*\/tag\/v([^[:space:]\r\n]+).*/\1/')
-  [ -n "$version" ] || { tell_warn "获取版本号失败，请检查网络"; return 1; }
+  printf '  正在拉取 Github 最新版 sing-box...\n'
+
+  local version arch url target_dir found
+
+  version=$(curl -fsSL \
+  https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+  | jq -r '.tag_name' \
+  | sed 's/^v//')
+
+  [ -n "$version" ] || {
+    tell_warn "获取版本号失败，请检查网络"
+    return 1
+  }
+
 
   case $(uname -m) in
-    x86_64|amd64) arch="linux-amd64" ;;
-    aarch64|arm64) arch="linux-arm64" ;;
-    armv7l|armv8l) arch="linux-armv7" ;;
-    armv6l) arch="linux-armv6" ;;
-    i386|i686) arch="linux-386" ;;
-    *) tell_warn "不支持的架构: $(uname -m)"; return 1 ;;
+    x86_64|amd64)
+      arch="linux-amd64"
+    ;;
+    aarch64|arm64)
+      arch="linux-arm64"
+    ;;
+    armv7l|armv8l)
+      arch="linux-armv7"
+    ;;
+    armv6l)
+      arch="linux-armv6"
+    ;;
+    i386|i686)
+      arch="linux-386"
+    ;;
+    *)
+      tell_warn "不支持的架构: $(uname -m)"
+      return 1
+    ;;
   esac
 
-  url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
-  target_dir="/var/lib/sbm_tmp"
-  success=0
 
-  for proxy in "https://mirror.ghproxy.com/" "https://ghproxy.net/" "https://github.moeyy.xyz/" ""; do
-    real_url="${proxy}${url}"
-    rm -rf "$target_dir" && mkdir -p "$target_dir"
-    
-    if curl -fsSL -m 120 "$real_url" | tar -xz -C "$target_dir" 2>/dev/null; then
-      found=$(find "$target_dir" -type f -name sing-box | head -1)
-      if [ -n "$found" ] && [ -x "$found" ]; then
-        rm -f "$CORE"
-        install -m755 "$found" "$CORE"
-        rm -rf "$target_dir"
-        core_cache_reset
-        state_set asset "$arch"
-        tell_ok "sing-box 内核已安装: v${version}"
-        success=1
-        break
-      fi
+  url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
+
+  target_dir="/var/lib/sbm_tmp"
+
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir"
+
+
+  if curl -fsSL -m 120 "$url" | tar -xz -C "$target_dir"; then
+
+    found=$(find "$target_dir" -type f -name sing-box | head -1)
+
+    if [ -n "$found" ] && [ -x "$found" ]; then
+
+      rm -f "$CORE"
+
+      install -m755 "$found" "$CORE"
+
+      rm -rf "$target_dir"
+
+      core_cache_reset
+
+      state_set asset "$arch"
+
+      tell_ok "sing-box 内核已安装: v${version}"
+
+      return 0
     fi
-  done
-  
-  if [ "$success" = 0 ]; then
-    rm -rf "$target_dir"
-    tell_warn "部署彻底失败，请检查网络连通性或 DNS 设置。"
-    return 1
   fi
-  return 0
+
+
+  rm -rf "$target_dir"
+
+  tell_warn "sing-box 下载失败，请检查 Github 连通性"
+
+  return 1
 }
 
 write_service(){
