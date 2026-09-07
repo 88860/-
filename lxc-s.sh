@@ -478,7 +478,7 @@ apply_config(){
   sync_bypass_rules
   sync_hopping_rules
   
-  bypass_rules_present || out_warn "系统内核不支持 sport 路由规则，服务可能中断"
+  bypass_rules_present || out_warn "当前LXC宿主内核不支持 sport 路由规则，普通代理不受影响，TUN/自动路由功能可能不可用"
   return 0
 }
 
