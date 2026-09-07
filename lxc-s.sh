@@ -204,7 +204,7 @@ install_core(){
   target_dir="/var/lib/sbm_tmp"
   success=0
 
-  for proxy in "https://mirror.ghproxy.com/" "https://ghproxy.net/" "https://github.moeyy.xyz/" ""; do
+  for proxy in ""; do
     real_url="${proxy}${url}"
     rm -rf "$target_dir" && mkdir -p "$target_dir"
     
