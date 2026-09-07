@@ -193,7 +193,7 @@ install_core(){
 
   case $(uname -m) in
     x86_64|amd64) arch="linux-amd64" ;;
-    aarch64|arm64) arch="linux-arm64" ;;
+    aarch64|arm64) arch="linux-arm64-musl" ;;
     armv7l|armv8l) arch="linux-armv7" ;;
     armv6l) arch="linux-armv6" ;;
     i386|i686) arch="linux-386" ;;
