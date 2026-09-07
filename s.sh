@@ -1221,13 +1221,13 @@ exit_label(){
 
 get_ip_info(){
   local mode=$1 res ip country asn name
-  res=$(curl -s -${mode} -m 5 https://speed.cloudflare.com/meta 2>/dev/null)
-  ip=$(jq -r '.clientIp // empty' <<<"$res" 2>/dev/null)
+  res=$(curl -s -${mode} -m 5 https://ipwho.is/ 2>/dev/null)
+  ip=$(jq -r '.ip // empty' <<<"$res" 2>/dev/null)
   if [ -n "$ip" ]; then
     country=$(jq -r '.country // empty' <<<"$res" 2>/dev/null)
-    asn=$(jq -r '.clientAsn // empty' <<<"$res" 2>/dev/null)
+    asn=$(jq -r '.connection.asn // empty' <<<"$res" 2>/dev/null)
     [ -n "$asn" ] && asn="AS$asn"
-    name=$(jq -r '.asOrganization // empty' <<<"$res" 2>/dev/null)
+    name=$(jq -r '.connection.org // empty' <<<"$res" 2>/dev/null)
     IP_INFO_IP="$ip"
     IP_INFO_C="$country"
     IP_INFO_ASN="$asn"
