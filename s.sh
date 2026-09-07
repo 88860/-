@@ -1610,7 +1610,7 @@ bootstrap
 while :; do
   clear
   tell "${CYAN}================================${PLAIN}"
-  tell "${CYAN}       sing-box 管理脚本        ${PLAIN}"
+  tell "${CYAN}              S 管理            ${PLAIN}"
   tell "${CYAN}================================${PLAIN}"
   tell "  1. 服务端管理"
   tell "  2. 客户端管理"
