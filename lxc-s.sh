@@ -1727,7 +1727,7 @@ while :; do
   clear
   tell "${CYAN}================================${PLAIN}"
   tell "${CYAN}            s管理               ${PLAIN}"
-  tell "${CYAN}  [ 完美适配原生纯净 Alpine ]   ${PLAIN}"
+  tell "${CYAN}     [ lxc Alpine 适配 ]        ${PLAIN}"
   tell "${CYAN}================================${PLAIN}"
   tell "  1. 服务端管理"
   tell "  2. 客户端管理"
