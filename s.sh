@@ -1659,7 +1659,7 @@ while :; do
   clear
   tell "${CYAN}================================${PLAIN}"
   tell "${CYAN}             s管理              ${PLAIN}"
-  tell "${CYAN}   [ 仅兼容 kvm debian环境 ]     ${PLAIN}"
+  tell "${CYAN}   [ 仅适配 kvm debian环境 ]     ${PLAIN}"
   tell "${CYAN}================================${PLAIN}"
   tell "  1. 服务端管理"
   tell "  2. 客户端管理"
