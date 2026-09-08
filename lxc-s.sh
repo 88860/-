@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 export GOMEMLIMIT=20MiB
-export GOGC=5
+export GOGC=30
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -173,7 +173,7 @@ check_dependencies(){
   command -v nft >/dev/null 2>&1 || to_install="$to_install nftables"
 
   if [ -n "$to_install" ]; then
-    tell "  [!] 内存极小，准备无索引极简模式安装..."
+    tell "  [!] 准备无索引极简模式安装..."
     
     # 清空可能存在的旧日志
     > "$apk_log"
@@ -185,7 +185,6 @@ check_dependencies(){
       sleep 2
     done
     
-    # 检查核心的四个组件是否真的安装上了
     for pkg in curl tar jq openssl; do
       if ! command -v "$pkg" >/dev/null 2>&1; then
         missing=1
@@ -196,7 +195,6 @@ check_dependencies(){
     if [ "$missing" = 1 ]; then
       tell_warn "系统组件安装失败，缺失核心组件: [ $missing_list ]"
       tell_warn "--- 以下是 Alpine 底层详细报错信息 ---"
-      # 将日志内容缩进并打印，让你一目了然
       cat "$apk_log" | sed 's/^/    /' >&2
       tell_warn "--------------------------------------"
       tell "  提示: 如果看到 'Killed'，说明连装组件都爆内存了;"
@@ -204,7 +202,6 @@ check_dependencies(){
       exit 1
     fi
     
-    # 如果安装成功，删除错误日志
     rm -f "$apk_log"
   fi
   return 0
@@ -246,19 +243,14 @@ install_core(){
 
   rm -rf "$target_dir" && mkdir -p "$target_dir"
   
-  tell "  正在流式下载与解压内核 (极其缓慢，预计 1-2 分钟)..."
+  tell "  正在流式下载与解压内核..."
   
-  # 【终极破局机制】直接用管道 | 连接 curl 和 tar，不保存压缩包！
-  # 强制把网速压死在 500K，强迫 tar 程序以每秒 1.5MB 的龟速解压，防止内存瞬间撑爆。
-  if curl -fsSL --limit-rate 500K -m 300 "$url" | tar -xz -C "$target_dir" 2>/dev/null; then
+  if curl -fsSL --limit-rate 1500K -m 300 "$url" | tar -xz -C "$target_dir" 2>/dev/null; then
     
     found=$(find "$target_dir" -type f -name sing-box | head -1)
     if [ -n "$found" ]; then
       rm -f "$CORE"
       install -m755 "$found" "$CORE"
-      
-      # 解压写盘完毕，强制休息 3 秒，等系统缓过神来
-      sleep 3
       
       if "$CORE" version >/dev/null 2>&1; then
         rm -rf "$target_dir"
@@ -275,13 +267,7 @@ install_core(){
   if [ "$success" = 0 ]; then
     rm -rf "$target_dir"
     out_gap
-    tell_warn "安装彻底失败！这台服务器的资源太极限了。"
-    tell "${YELLOW}您现在只能使用终极方法：${PLAIN}"
-    tell "1. 在电脑浏览器里下载 Linux 版本的 sing-box (选 $arch 架构)"
-    tell "2. 在电脑上解压出 sing-box 文件"
-    tell "3. 用 FTP 或 FinalShell 把文件上传到小鸡的 ${GREEN}/usr/local/bin/${PLAIN} 目录下"
-    tell "4. 执行 ${CYAN}chmod +x /usr/local/bin/sing-box${PLAIN}"
-    tell "5. 重新运行本脚本。"
+    tell_warn "安装失败！请尝试输入s回车启动脚本，手动检查更新singbox。"
     return 1
   fi
   return 0
@@ -1787,7 +1773,7 @@ run_update(){
   fi
   out_gap
   
-  tell "正在检测 s 脚本更新..."
+  tell "正在检测脚本更新..."
   script_url="https://raw.githubusercontent.com/88860/-/main/lxc-s.sh"
   script_tmp=$(mktemp)
   TMP_FILES="$TMP_FILES $script_tmp"
@@ -1897,9 +1883,7 @@ bootstrap(){
   
   if [ ! -x "$CORE" ]; then
     printf '  %b首次运行，准备安装 sing-box...%b\n' "${CYAN}" "${PLAIN}"
-    tell "${YELLOW}系统整理中，请等待 8 秒让内核自动回收内存...${PLAIN}"
     sync 2>/dev/null
-    sleep 8
     install_core || exit 1
     write_service
     rc-update add sing-box default >/dev/null 2>&1
