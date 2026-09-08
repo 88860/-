@@ -274,7 +274,7 @@ depend() {
 
 start_pre() {
     export GOMEMLIMIT=20MiB
-    export GOGC=30
+    export GOGC=10
 }
 
 start_post() {
