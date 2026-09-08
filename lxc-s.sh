@@ -160,7 +160,6 @@ state_get(){ jq -r --arg k "$1" '.[$k]//""' "$STATE" 2>/dev/null; }
 state_set(){ json_edit "$STATE" '.[$k]=$v' --arg k "$1" --arg v "$2"; }
 
 check_dependencies(){
-check_dependencies(){
   local missing=0 to_install="" missing_list=""
   local apk_log="/root/apk_error.log"
   
