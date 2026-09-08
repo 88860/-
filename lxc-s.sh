@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 export GOMEMLIMIT=20MiB
-export GOGC=30
+export GOGC=5
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -263,7 +263,7 @@ depend() {
 
 start_pre() {
     export GOMEMLIMIT=20MiB
-    export GOGC=30
+    export GOGC=5
 }
 
 start_post() {
