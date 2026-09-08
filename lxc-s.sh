@@ -186,14 +186,15 @@ install_core(){
   version=$(remote_version)
   [ -n "$version" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
 
-  case $(uname -m) in
-    x86_64|amd64) arch="linux-amd64" ;;
+    case $(uname -m) in
+    x86_64|amd64) arch="linux-amd64-musl" ;;
     aarch64|arm64) arch="linux-arm64-musl" ;;
-    armv7l|armv8l) arch="linux-armv7" ;;
+    armv7l|armv8l) arch="linux-armv7-musl" ;;
     armv6l) arch="linux-armv6" ;;
-    i386|i686) arch="linux-386" ;;
+    i386|i686) arch="linux-386-musl" ;;
     *) tell_warn "未找到匹配架构的安装包: $(uname -m)"; return 1 ;;
   esac
+
 
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
   target_dir="/var/lib/sbm_tmp"
