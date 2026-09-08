@@ -160,7 +160,9 @@ state_get(){ jq -r --arg k "$1" '.[$k]//""' "$STATE" 2>/dev/null; }
 state_set(){ json_edit "$STATE" '.[$k]=$v' --arg k "$1" --arg v "$2"; }
 
 check_dependencies(){
-  local missing=0 to_install=""
+check_dependencies(){
+  local missing=0 to_install="" missing_list=""
+  local apk_log="/root/apk_error.log"
   
   command -v ip >/dev/null 2>&1 || to_install="$to_install iproute2"
   command -v ss >/dev/null 2>&1 || to_install="$to_install iproute2-ss"
@@ -174,21 +176,37 @@ check_dependencies(){
   if [ -n "$to_install" ]; then
     tell "  [!] 内存极小，准备无索引极简模式安装..."
     
-    # 绝对不能执行 apk update！直接用 --no-cache 边下边装
+    # 清空可能存在的旧日志
+    > "$apk_log"
+    
     for pkg in $to_install; do
-      apk add --quiet --no-cache "$pkg" >/dev/null 2>&1
+      # 这一次去掉了隐藏输出的参数，把真实的底层报错全部追加到日志里
+      apk add --no-cache "$pkg" >>"$apk_log" 2>&1
       grep -qx "$pkg" "$PKG_LOG" 2>/dev/null || echo "$pkg" >>"$PKG_LOG"
-      sleep 2 # 给内核留出回收内存的喘息时间
+      sleep 2
     done
     
+    # 检查核心的四个组件是否真的安装上了
     for pkg in curl tar jq openssl; do
-      command -v "$pkg" >/dev/null 2>&1 || missing=1
+      if ! command -v "$pkg" >/dev/null 2>&1; then
+        missing=1
+        missing_list="$missing_list $pkg"
+      fi
     done
     
     if [ "$missing" = 1 ]; then
-      tell_warn "系统组件安装失败 (极有可能是内存耗尽，请重新运行脚本)"
+      tell_warn "系统组件安装失败，缺失核心组件: [ $missing_list ]"
+      tell_warn "--- 以下是 Alpine 底层详细报错信息 ---"
+      # 将日志内容缩进并打印，让你一目了然
+      cat "$apk_log" | sed 's/^/    /' >&2
+      tell_warn "--------------------------------------"
+      tell "  提示: 如果看到 'Killed'，说明连装组件都爆内存了;"
+      tell "        如果看到 'fetch error/timeout'，则是小鸡网络拉取源超时。"
       exit 1
     fi
+    
+    # 如果安装成功，删除错误日志
+    rm -f "$apk_log"
   fi
   return 0
 }
