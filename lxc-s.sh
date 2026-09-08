@@ -160,7 +160,9 @@ state_get(){ jq -r --arg k "$1" '.[$k]//""' "$STATE" 2>/dev/null; }
 state_set(){ json_edit "$STATE" '.[$k]=$v' --arg k "$1" --arg v "$2"; }
 
 check_dependencies(){
+  local missing=0
   local to_install=""
+  
   command -v ip >/dev/null 2>&1 || to_install="$to_install iproute2"
   command -v ss >/dev/null 2>&1 || to_install="$to_install iproute2-ss"
   command -v ping >/dev/null 2>&1 || to_install="$to_install iputils"
@@ -171,11 +173,22 @@ check_dependencies(){
   command -v nft >/dev/null 2>&1 || to_install="$to_install nftables"
 
   if [ -n "$to_install" ]; then
+    tell "  [!] 为兼容小内存环境，逐个安装依赖..."
     apk update -q >/dev/null 2>&1
-    apk add --quiet --no-cache $to_install >/dev/null 2>&1 || { tell_warn "系统组件安装失败"; exit 1; }
     for pkg in $to_install; do
+      apk add --quiet --no-cache "$pkg" >/dev/null 2>&1
       grep -qx "$pkg" "$PKG_LOG" 2>/dev/null || echo "$pkg" >>"$PKG_LOG"
+      sync 2>/dev/null; sleep 2
     done
+    
+    for pkg in curl tar jq openssl; do
+      command -v "$pkg" >/dev/null 2>&1 || missing=1
+    done
+    
+    if [ "$missing" = 1 ]; then
+      tell_warn "系统组件安装失败 (极有可能是内存耗尽，请重新运行脚本)"
+      exit 1
+    fi
   fi
   return 0
 }
@@ -211,22 +224,30 @@ install_core(){
   esac
 
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
-  target_dir="/tmp/sbm_tmp"
+  
+  target_dir="/root/.sbm_tmp"
   tarball="${target_dir}/sb.tar.gz"
   success=0
 
   rm -rf "$target_dir" && mkdir -p "$target_dir"
   
   tell "  正在下载内核..."
+  sync 2>/dev/null; sleep 2
   
   if curl -fsSL --limit-rate 2M -m 120 "$url" -o "$tarball" 2>/dev/null; then
+    sync 2>/dev/null; sleep 2
     tell "  正在解压内核..."
+    
     if tar -xzf "$tarball" -C "$target_dir" 2>/dev/null; then
       rm -f "$tarball"
+      sync 2>/dev/null; sleep 2
+      
       found=$(find "$target_dir" -type f -name sing-box | head -1)
       if [ -n "$found" ]; then
         rm -f "$CORE"
         install -m755 "$found" "$CORE"
+        
+        sync 2>/dev/null; sleep 2
         
         if "$CORE" version >/dev/null 2>&1; then
           rm -rf "$target_dir"
@@ -1860,11 +1881,9 @@ bootstrap(){
   
   if [ ! -x "$CORE" ]; then
     printf '  %b首次运行，准备安装 sing-box...%b\n' "${CYAN}" "${PLAIN}"
-    
-    tell "${YELLOW}系统依赖配置完毕，正在等待自动回收内存...${PLAIN}"
+    tell "${YELLOW}系统整理中，请等待 8 秒让内核自动回收内存...${PLAIN}"
     sync 2>/dev/null
     sleep 8
-    
     install_core || exit 1
     write_service
     rc-update add sing-box default >/dev/null 2>&1
