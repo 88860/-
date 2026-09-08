@@ -984,7 +984,7 @@ menu_modify_protocol(){
 }
 
 render_certificate_status(){
-  local domain crt expiry days
+  local domain crt expiry days mtime
   domain=$(state_get domain); [ -n "$domain" ] || return 0
   tell ""
   tell "  全局域名: $domain | 验证: $(state_get challenge)"
@@ -993,7 +993,14 @@ render_certificate_status(){
   [ -n "$crt" ] || { tell "  ${YELLOW}证书状态: 未签发${PLAIN}"; return 0; }
   expiry=$(openssl x509 -enddate -noout -in "$crt" 2>/dev/null | cut -d= -f2)
   [ -n "$expiry" ] || { tell "  ${RED}证书状态: 无法读取${PLAIN}"; return 0; }
-  days=$(( ( $(date -d "$expiry" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+  
+  mtime=$(stat -c %Y "$crt" 2>/dev/null || echo 0)
+  if [ "$mtime" -gt 0 ]; then
+    days=$(( (mtime + 7776000 - $(date +%s)) / 86400 ))
+  else
+    days=0
+  fi
+  
   tell "  到期时间: $expiry | 剩余: ${days} 天"
   rc-service sing-box status >/dev/null 2>&1 || tell_warn "服务离线，无法自动续期"
 }
