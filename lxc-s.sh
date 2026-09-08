@@ -1747,7 +1747,7 @@ while :; do
   clear
   tell "${CYAN}================================${PLAIN}"
   tell "${CYAN}            s管理               ${PLAIN}"
-  tell "${CYAN}       只支持lxc alpine         ${PLAIN}"
+  tell "${CYAN}［ 仅适配lxc alpine 无tun权限环境］${PLAIN}"
   tell "${CYAN}================================${PLAIN}"
   tell "  1. 服务端管理"
   tell "  2. 客户端管理"
