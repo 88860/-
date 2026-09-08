@@ -1674,24 +1674,30 @@ run_uninstall(){
 
 menu_status(){
   while :; do
-    clear
-    tell "${CYAN}========== 状态与更新 ==========${PLAIN}"
     local os=$(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null || echo "Alpine Linux")
     local core=$(uname -r)
     local arch=$(uname -m)
-    local mem=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}/MemFree/{f=$2}/Buffers/{b=$2}/^Cached/{c=$2}END{if(a=="")a=f+b+c; printf "%d / %d MB",(t-a)/1024,t/1024}' /proc/meminfo)
+    local mem=$(awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}/MemFree/{f=$2}/Buffers/{b=$2}/^Cached/{c=$2}END{if(a=="")a=f+b+c; printf "%d / %d MB",(t-a)/1024,t/1024}' /proc/meminfo 2>/dev/null)
     
-    local up_seconds=$(cut -d. -f1 /proc/uptime)
-    local up_days=$((up_seconds / 86400))
-    local up_hours=$(( (up_seconds % 86400) / 3600 ))
-    local up_mins=$(( (up_seconds % 3600) / 60 ))
-    local up="${up_days}天 ${up_hours}小时 ${up_mins}分钟"
-    
+    local up="未知"
+    local up_seconds=$(awk '{print $1}' /proc/uptime 2>/dev/null | cut -d. -f1)
+    if [ -n "$up_seconds" ] && echo "$up_seconds" | grep -Eq '^[0-9]+$'; then
+      local up_days=$((up_seconds / 86400))
+      local up_hours=$(( (up_seconds % 86400) / 3600 ))
+      local up_mins=$(( (up_seconds % 3600) / 60 ))
+      up="${up_days}天 ${up_hours}小时 ${up_mins}分钟"
+    else
+      local up_raw=$(uptime -p 2>/dev/null | sed 's/up //;s/days/天/;s/day/天/;s/hours/小时/;s/hour/小时/;s/minutes/分钟/;s/minute/分钟/')
+      [ -n "$up_raw" ] && up="$up_raw"
+    fi
+
     local sb_ver=$(core_version)
     local sb_asset=$(state_get asset)
     local s_state="${RED}未运行${PLAIN}"
     rc-service sing-box status >/dev/null 2>&1 && s_state="${GREEN}正常运行 (守护生效)${PLAIN}"
-    
+
+    clear
+    tell "${CYAN}========== 状态与更新 ==========${PLAIN}"
     tell "  系统版本: ${os}"
     tell "  内核架构: ${core} (${arch})"
     tell "  内存状态: ${mem}"
