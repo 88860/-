@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 export GOMEMLIMIT=20MiB
-export GOGC=10
+export GOGC=5
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -198,8 +198,10 @@ remote_version(){
 install_core(){
   local version arch url target_dir found success tarball
   
-  echo -1000 > /proc/$$/oom_score_adj 2>/dev/null || true
-  pgrep sshd | while read -r pid; do echo -1000 > /proc/"$pid"/oom_score_adj 2>/dev/null || true; done
+  [ -w "/proc/$$/oom_score_adj" ] && echo -1000 > "/proc/$$/oom_score_adj"
+  pgrep sshd | while read -r pid; do 
+    [ -w "/proc/$pid/oom_score_adj" ] && echo -1000 > "/proc/$pid/oom_score_adj"
+  done
 
   version=$(remote_version)
   [ -n "$version" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
@@ -222,22 +224,14 @@ install_core(){
   
   tell "  正在下载内核..."
   
-  sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-  
   if curl -fsSL --limit-rate 2M -m 120 "$url" -o "$tarball" 2>/dev/null; then
-    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-    
     tell "  正在解压内核..."
     if tar -xzf "$tarball" -C "$target_dir" 2>/dev/null; then
       rm -f "$tarball"
-      sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-      
       found=$(find "$target_dir" -type f -name sing-box | head -1)
       if [ -n "$found" ]; then
         rm -f "$CORE"
         install -m755 "$found" "$CORE"
-        
-        sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
         
         if "$CORE" version >/dev/null 2>&1; then
           rm -rf "$target_dir"
@@ -252,17 +246,18 @@ install_core(){
     fi
   fi
   
-  echo 0 > /proc/$$/oom_score_adj 2>/dev/null || true
-  pgrep sshd | while read -r pid; do echo 0 > /proc/"$pid"/oom_score_adj 2>/dev/null || true; done
+  [ -w "/proc/$$/oom_score_adj" ] && echo 0 > "/proc/$$/oom_score_adj"
+  pgrep sshd | while read -r pid; do 
+    [ -w "/proc/$pid/oom_score_adj" ] && echo 0 > "/proc/$pid/oom_score_adj"
+  done
   
   if [ "$success" = 0 ]; then
     rm -rf "$target_dir"
-    tell_warn "安装失败，可能内存不足"
+    tell_warn "安装失败"
     return 1
   fi
   return 0
 }
-
 
 write_service(){
   cat >"$SERVICE_FILE" <<EOF
