@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 export GOMEMLIMIT=20MiB
-export GOGC=5
+export GOGC=10
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -198,6 +198,9 @@ remote_version(){
 install_core(){
   local version arch url target_dir found success tarball
   
+  echo -1000 > /proc/$$/oom_score_adj 2>/dev/null || true
+  pgrep sshd | while read -r pid; do echo -1000 > /proc/"$pid"/oom_score_adj 2>/dev/null || true; done
+
   version=$(remote_version)
   [ -n "$version" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
 
@@ -211,25 +214,30 @@ install_core(){
   esac
 
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
-  target_dir="/var/lib/sbm_tmp"
+  target_dir="/usr/local/sbm_tmp"
   tarball="${target_dir}/sb.tar.gz"
   success=0
 
   rm -rf "$target_dir" && mkdir -p "$target_dir"
   
   tell "  正在下载内核..."
-  if curl -fsSL -m 120 "$url" -o "$tarball" 2>/dev/null; then
-    sync 2>/dev/null
+  
+  sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+  
+  if curl -fsSL --limit-rate 2M -m 120 "$url" -o "$tarball" 2>/dev/null; then
+    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     
     tell "  正在解压内核..."
     if tar -xzf "$tarball" -C "$target_dir" 2>/dev/null; then
       rm -f "$tarball"
+      sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+      
       found=$(find "$target_dir" -type f -name sing-box | head -1)
       if [ -n "$found" ]; then
         rm -f "$CORE"
         install -m755 "$found" "$CORE"
         
-        sync 2>/dev/null
+        sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
         
         if "$CORE" version >/dev/null 2>&1; then
           rm -rf "$target_dir"
@@ -244,13 +252,17 @@ install_core(){
     fi
   fi
   
+  echo 0 > /proc/$$/oom_score_adj 2>/dev/null || true
+  pgrep sshd | while read -r pid; do echo 0 > /proc/"$pid"/oom_score_adj 2>/dev/null || true; done
+  
   if [ "$success" = 0 ]; then
     rm -rf "$target_dir"
-    tell_warn "安装包下载或解压失败"
+    tell_warn "安装失败，可能内存不足"
     return 1
   fi
   return 0
 }
+
 
 write_service(){
   cat >"$SERVICE_FILE" <<EOF
@@ -274,7 +286,7 @@ depend() {
 
 start_pre() {
     export GOMEMLIMIT=20MiB
-    export GOGC=5
+    export GOGC=30
 }
 
 start_post() {
