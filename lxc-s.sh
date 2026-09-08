@@ -289,8 +289,9 @@ hopping_node(){
   return 1
 }
 
-local_ipv4(){ ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; }
-local_ipv6(){ ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; }
+local_ipv4(){ local ip; ip=$(curl -s -m 5 http://ipv4.icanhazip.com 2>/dev/null | tr -d '\n '); [ -n "$ip" ] && printf '%s' "$ip" || ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; }
+local_ipv6(){ local ip; ip=$(curl -s -m 5 http://ipv6.icanhazip.com 2>/dev/null | tr -d '\n '); [ -n "$ip" ] && printf '%s' "$ip" || ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; }
+
 resolve_addresses(){ command -v getent >/dev/null && getent ahosts "$1" 2>/dev/null | awk '{print $1}' | sort -u || ping -c1 "$1" 2>/dev/null | sed -n '1p' | sed -n 's/.*(\([0-9\.]*\)).*/\1/p'; }
 
 sync_hopping_rules(){
