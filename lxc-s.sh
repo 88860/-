@@ -197,11 +197,6 @@ remote_version(){
 
 install_core(){
   local version arch url target_dir found success tarball
-  
-  [ -w "/proc/$$/oom_score_adj" ] && echo -1000 > "/proc/$$/oom_score_adj"
-  pgrep sshd | while read -r pid; do 
-    [ -w "/proc/$pid/oom_score_adj" ] && echo -1000 > "/proc/$pid/oom_score_adj"
-  done
 
   version=$(remote_version)
   [ -n "$version" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
@@ -245,11 +240,6 @@ install_core(){
       fi
     fi
   fi
-  
-  [ -w "/proc/$$/oom_score_adj" ] && echo 0 > "/proc/$$/oom_score_adj"
-  pgrep sshd | while read -r pid; do 
-    [ -w "/proc/$pid/oom_score_adj" ] && echo 0 > "/proc/$pid/oom_score_adj"
-  done
   
   if [ "$success" = 0 ]; then
     rm -rf "$target_dir"
@@ -1869,7 +1859,12 @@ bootstrap(){
   ln -sf "$SELF" "$SHORTCUT" 2>/dev/null
   
   if [ ! -x "$CORE" ]; then
-    printf '  %b首次运行，安装 sing-box...%b\n' "${CYAN}" "${PLAIN}"
+    printf '  %b首次运行，准备安装 sing-box...%b\n' "${CYAN}" "${PLAIN}"
+    
+    tell "${YELLOW}系统依赖配置完毕，正在等待自动回收内存...${PLAIN}"
+    sync 2>/dev/null
+    sleep 8
+    
     install_core || exit 1
     write_service
     rc-update add sing-box default >/dev/null 2>&1
