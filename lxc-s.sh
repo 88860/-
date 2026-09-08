@@ -216,7 +216,7 @@ install_core(){
   esac
 
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
-  target_dir="/usr/local/sbm_tmp"
+  target_dir="/tmp/sbm_tmp"
   tarball="${target_dir}/sb.tar.gz"
   success=0
 
