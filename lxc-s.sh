@@ -11,7 +11,6 @@ PURPLE='\033[35m'
 BLUE='\033[34m'
 PLAIN='\033[0m'
 
-# 修复：clear 同时清除滚动缓冲，避免 SSH 客户端滚屏残留旧界面
 clear(){ printf '\033[H\033[2J\033[3J'; }
 
 SB_DIR=/etc/sing-box
