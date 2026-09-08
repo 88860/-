@@ -251,7 +251,7 @@ install_core(){
   
   # 【终极破局机制】直接用管道 | 连接 curl 和 tar，不保存压缩包！
   # 强制把网速压死在 500K，强迫 tar 程序以每秒 1.5MB 的龟速解压，防止内存瞬间撑爆。
-  if curl -fsSL --limit-rate 1500K -m 300 "$url" | tar -xz -C "$target_dir" 2>/dev/null; then
+  if curl -fsSL --limit-rate 500K -m 300 "$url" | tar -xz -C "$target_dir" 2>/dev/null; then
     
     found=$(find "$target_dir" -type f -name sing-box | head -1)
     if [ -n "$found" ]; then
