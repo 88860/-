@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 export GOMEMLIMIT=20MiB
-export GOGC=30
+export GOGC=10
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -196,7 +196,7 @@ remote_version(){
 }
 
 install_core(){
-  local version arch url target_dir found success
+  local version arch url target_dir found success tarball
   
   version=$(remote_version)
   [ -n "$version" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
@@ -212,23 +212,34 @@ install_core(){
 
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
   target_dir="/var/lib/sbm_tmp"
+  tarball="${target_dir}/sb.tar.gz"
   success=0
 
   rm -rf "$target_dir" && mkdir -p "$target_dir"
   
-  if curl -fsSL -m 120 "$url" | tar -xz -C "$target_dir" 2>/dev/null; then
-    found=$(find "$target_dir" -type f -name sing-box | head -1)
-    if [ -n "$found" ]; then
-      rm -f "$CORE"
-      install -m755 "$found" "$CORE"
-      if "$CORE" version >/dev/null 2>&1; then
-        rm -rf "$target_dir"
-        core_cache_reset
-        state_set asset "$arch"
-        tell_ok "sing-box 内核已安装: $(core_version) [$arch]"
-        success=1
-      else
-        tell_warn "未找到二进制文件或架构不匹配"
+  tell "  正在下载内核..."
+  if curl -fsSL -m 120 "$url" -o "$tarball" 2>/dev/null; then
+    sync 2>/dev/null
+    
+    tell "  正在解压内核..."
+    if tar -xzf "$tarball" -C "$target_dir" 2>/dev/null; then
+      rm -f "$tarball"
+      found=$(find "$target_dir" -type f -name sing-box | head -1)
+      if [ -n "$found" ]; then
+        rm -f "$CORE"
+        install -m755 "$found" "$CORE"
+        
+        sync 2>/dev/null
+        
+        if "$CORE" version >/dev/null 2>&1; then
+          rm -rf "$target_dir"
+          core_cache_reset
+          state_set asset "$arch"
+          tell_ok "sing-box 内核已安装: $(core_version) [$arch]"
+          success=1
+        else
+          tell_warn "未找到二进制文件或架构不匹配"
+        fi
       fi
     fi
   fi
