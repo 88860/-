@@ -160,8 +160,7 @@ state_get(){ jq -r --arg k "$1" '.[$k]//""' "$STATE" 2>/dev/null; }
 state_set(){ json_edit "$STATE" '.[$k]=$v' --arg k "$1" --arg v "$2"; }
 
 check_dependencies(){
-  local missing=0
-  local to_install=""
+  local missing=0 to_install=""
   
   command -v ip >/dev/null 2>&1 || to_install="$to_install iproute2"
   command -v ss >/dev/null 2>&1 || to_install="$to_install iproute2-ss"
@@ -173,12 +172,13 @@ check_dependencies(){
   command -v nft >/dev/null 2>&1 || to_install="$to_install nftables"
 
   if [ -n "$to_install" ]; then
-    tell "  [!] 为兼容小内存环境，逐个安装依赖..."
-    apk update -q >/dev/null 2>&1
+    tell "  [!] 内存极小，准备无索引极简模式安装..."
+    
+    # 绝对不能执行 apk update！直接用 --no-cache 边下边装
     for pkg in $to_install; do
       apk add --quiet --no-cache "$pkg" >/dev/null 2>&1
       grep -qx "$pkg" "$PKG_LOG" 2>/dev/null || echo "$pkg" >>"$PKG_LOG"
-      sync 2>/dev/null; sleep 2
+      sleep 2 # 给内核留出回收内存的喘息时间
     done
     
     for pkg in curl tar jq openssl; do
@@ -209,8 +209,8 @@ remote_version(){
 }
 
 install_core(){
-  local version arch url target_dir found success tarball
-
+  local version arch url target_dir found success
+  
   version=$(remote_version)
   [ -n "$version" ] || { tell_warn "获取版本信息失败，请检查网络"; return 1; }
 
@@ -224,52 +224,51 @@ install_core(){
   esac
 
   url="https://github.com/SagerNet/sing-box/releases/download/v${version}/sing-box-${version}-${arch}.tar.gz"
-  
   target_dir="/root/.sbm_tmp"
-  tarball="${target_dir}/sb.tar.gz"
   success=0
 
   rm -rf "$target_dir" && mkdir -p "$target_dir"
   
-  tell "  正在下载内核..."
-  sync 2>/dev/null; sleep 2
+  tell "  正在流式下载与解压内核 (极其缓慢，预计 1-2 分钟)..."
   
-  if curl -fsSL --limit-rate 2M -m 120 "$url" -o "$tarball" 2>/dev/null; then
-    sync 2>/dev/null; sleep 2
-    tell "  正在解压内核..."
+  # 【终极破局机制】直接用管道 | 连接 curl 和 tar，不保存压缩包！
+  # 强制把网速压死在 500K，强迫 tar 程序以每秒 1.5MB 的龟速解压，防止内存瞬间撑爆。
+  if curl -fsSL --limit-rate 500K -m 300 "$url" | tar -xz -C "$target_dir" 2>/dev/null; then
     
-    if tar -xzf "$tarball" -C "$target_dir" 2>/dev/null; then
-      rm -f "$tarball"
-      sync 2>/dev/null; sleep 2
+    found=$(find "$target_dir" -type f -name sing-box | head -1)
+    if [ -n "$found" ]; then
+      rm -f "$CORE"
+      install -m755 "$found" "$CORE"
       
-      found=$(find "$target_dir" -type f -name sing-box | head -1)
-      if [ -n "$found" ]; then
-        rm -f "$CORE"
-        install -m755 "$found" "$CORE"
-        
-        sync 2>/dev/null; sleep 2
-        
-        if "$CORE" version >/dev/null 2>&1; then
-          rm -rf "$target_dir"
-          core_cache_reset
-          state_set asset "$arch"
-          tell_ok "sing-box 内核已安装: $(core_version) [$arch]"
-          success=1
-        else
-          tell_warn "未找到二进制文件或架构不匹配"
-        fi
+      # 解压写盘完毕，强制休息 3 秒，等系统缓过神来
+      sleep 3
+      
+      if "$CORE" version >/dev/null 2>&1; then
+        rm -rf "$target_dir"
+        core_cache_reset
+        state_set asset "$arch"
+        tell_ok "sing-box 内核已安装: $(core_version) [$arch]"
+        success=1
+      else
+        tell_warn "未找到二进制文件或架构不匹配"
       fi
     fi
   fi
   
   if [ "$success" = 0 ]; then
     rm -rf "$target_dir"
-    tell_warn "安装失败"
+    out_gap
+    tell_warn "安装彻底失败！这台服务器的资源太极限了。"
+    tell "${YELLOW}您现在只能使用终极方法：${PLAIN}"
+    tell "1. 在电脑浏览器里下载 Linux 版本的 sing-box (选 $arch 架构)"
+    tell "2. 在电脑上解压出 sing-box 文件"
+    tell "3. 用 FTP 或 FinalShell 把文件上传到小鸡的 ${GREEN}/usr/local/bin/${PLAIN} 目录下"
+    tell "4. 执行 ${CYAN}chmod +x /usr/local/bin/sing-box${PLAIN}"
+    tell "5. 重新运行本脚本。"
     return 1
   fi
   return 0
 }
-
 write_service(){
   cat >"$SERVICE_FILE" <<EOF
 #!/sbin/openrc-run
