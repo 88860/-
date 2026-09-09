@@ -374,15 +374,24 @@ build_config(){
         else $in end ]' "$@") || return 1
   fi
   
-  outbounds='[{"type":"direct","tag":"direct"}]'
+    outbounds='[{"type":"direct","tag":"direct"}]'
 
-  if [ "$selected" = "wireguard" ] || [ "$probe_target" = "wireguard" ]; then
-    if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
-      endpoints=$(jq '[.endpoint]' "$WG_CONF")
-      if [ "$(jq -r .role "$WG_CONF")" = client ] && [ "$selected" = "wireguard" ]; then
-        peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
-        final="wireguard"
-      fi
+  local wg_enabled=false
+  local wg_role=""
+  if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
+    wg_enabled=true
+    wg_role=$(jq -r '.role//""' "$WG_CONF")
+  fi
+
+  if [ "$wg_enabled" = true ] && { [ "$wg_role" = "server" ] || [ "$selected" = "wireguard" ] || [ "$probe_target" = "wireguard" ]; }; then
+    endpoints=$(jq '[.endpoint]' "$WG_CONF")
+    
+    if [ "$wg_role" = "server" ]; then
+      inbounds=$(jq -n --argjson list "$inbounds" --arg iface "$WG_IF" '
+        [{type:"direct",tag:"wg-in",network:$iface,listen:"::",listen_port:0}] + $list')
+    elif [ "$wg_role" = "client" ] && [ "$selected" = "wireguard" ]; then
+      peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
+      final="wireguard"
     fi
   fi
   
