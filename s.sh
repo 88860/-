@@ -374,10 +374,10 @@ build_config(){
        end)
     + [{ip_is_private:true,action:"route",outbound:"direct"}]')
     
-  local dns_direct_server="https://1.1.1.1/dns-query"
+    local dns_direct_server="1.1.1.1" 
   local dns_remote_server="8.8.8.8"
   if [ -z "$(local_ipv4)" ] && [ -n "$(local_ipv6)" ]; then
-    dns_direct_server="https://[2606:4700:4700::1111]/dns-query"
+    dns_direct_server="2606:4700:4700::1111" 
     dns_remote_server="2001:4860:4860::8888"
   fi
 
@@ -386,7 +386,7 @@ build_config(){
     {
       servers: [
         {
-          type: "https",
+          type: "udp",
           tag: "dns-direct",
           server: $direct_srv,
           detour: "direct"
