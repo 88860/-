@@ -819,7 +819,7 @@ list_nodes(){
 }
 
 select_node(){
-  local index i=0 file
+  local index file
   list_nodes; tell "  0. 返回"
   [ "$NODE_COUNT" = 0 ] && { wait_key; return 1; }
   while :; do
@@ -827,6 +827,7 @@ select_node(){
     [ -z "$index" ] && return 1
     [ "$index" = 0 ] && return 1
     if echo "$index" | grep -Eq '^[0-9]+$' && [ "$index" -ge 1 ] && [ "$index" -le "$NODE_COUNT" ]; then
+      local i=0
       for file in "$NODE_DIR"/*.json; do
         [ -e "$file" ] || continue
         i=$((i+1))
