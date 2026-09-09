@@ -1374,16 +1374,18 @@ menu_client(){
 }
 
 wg_tunnel_state(){
-  local peer_ip=$1 latest now
+  local peer_ip=$1
+  
   [ -d "/sys/class/net/$WG_IF" ] || { echo down; return; }
-  if command -v ping >/dev/null 2>&1 && ping -c1 -W3 "$peer_ip" >/dev/null 2>&1; then echo up; return; fi
-  if command -v wg >/dev/null 2>&1; then
-    latest=$(wg show "$WG_IF" latest-handshakes 2>/dev/null | awk '{print $2}')
-    if [ -n "$latest" ] && [ "$latest" -gt 0 ]; then
-      now=$(date +%s)
-      if [ $((now - latest)) -le 180 ]; then echo up; return; fi
-    fi
+  
+  if command -v ping >/dev/null 2>&1 && ping -c1 -W3 "$peer_ip" >/dev/null 2>&1; then 
+    echo up; return; 
   fi
+  
+  if curl --interface "$WG_IF" -s -o /dev/null --connect-timeout 4 -m 6 "$PROBE_URL"; then
+    echo up; return;
+  fi
+  
   echo down
 }
 
