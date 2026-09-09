@@ -1528,7 +1528,7 @@ wg_setup(){
       listen_port=$(prompt_port "u" "") || return
       break
     done
-    peer_key=$(prompt "客户端公钥(留空稍后回填):")
+    peer_key=$(prompt "客户端公钥(留空稍后回填)")
     
     body=$(jq -n --arg private "$private" --arg public "$public" --arg a4 "$address4" --arg a6 "$address6" \
           --argjson port "$listen_port" --arg peer_key "$peer_key" \
