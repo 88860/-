@@ -964,7 +964,7 @@ menu_server_info(){
     tell "── $(jq -r .name "$file") [$(jq -r .kind "$file")] | 端口 $port $status"
     render_share_uri "$file"
   done
-  [ "$count" = 0 ] && tell "\n  暂无搭建好的节点"
+  [ "$count" = 0 ] && tell "\n  暂无节点"
   render_certificate_status
   wait_key
 }
