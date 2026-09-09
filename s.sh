@@ -338,12 +338,12 @@ build_config(){
   
   outbounds='[{"type":"direct","tag":"direct"}]'
 
-  if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
+    if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
     endpoints=$(jq '[.endpoint]' "$WG_CONF")
     if [ "$(jq -r .role "$WG_CONF")" = client ]; then
       peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
       outbounds=$(jq -n --argjson base "$outbounds" --arg wg "$WG_IF" \
-        $base + [{"type":"direct","tag":"wg-direct","bind_interface":$wg}]')
+        '$base + [{"type":"direct","tag":"wg-direct","bind_interface":$wg}]')
       [ "$selected" = wireguard ] && { final="wg-direct"; use_tun=1; }
     fi
   fi
@@ -1686,7 +1686,7 @@ run_uninstall(){
   local packages guard=0
   clear
   tell_warn "警告: 卸载将清空所有配置"
-  [ "$(prompt '输入 yes 确认')" = yes || return
+  [ "$(prompt '输入 yes 确认')" = yes ] || return
   mapfile -t packages < <(grep -v '^[[:space:]]*$' "$PKG_LOG" 2>/dev/null)
   
   systemctl disable --now sing-box 2>/dev/null
