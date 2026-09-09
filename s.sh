@@ -1657,7 +1657,7 @@ run_uninstall(){
   local packages guard=0
   clear
   tell_warn "警告: 卸载将清空所有配置"
-  [ "$(prompt '输入 yes 确认')" = yes || return
+  [ "$(prompt '输入 yes 确认')" = yes ] || return
   mapfile -t packages < <(grep -v '^[[:space:]]*$' "$PKG_LOG" 2>/dev/null)
   
   systemctl disable --now sing-box 2>/dev/null
