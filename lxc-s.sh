@@ -563,7 +563,14 @@ setup_certificate(){
   has_acme_support || { tell_warn "系统组件缺失，无法进行自动签发"; return 1; }
   
   printf '\n  %b该协议需要绑定域名并签发证书%b\n' "${YELLOW}" "${PLAIN}"
-  domain=$(prompt "输入域名" "$suggest"); [ -n "$domain" ] || return 1
+  
+  if [ -n "$suggest" ]; then
+    domain="$suggest"
+    printf '  %b已指定域名: %s%b\n' "${GREEN}" "$domain" "${PLAIN}"
+  else
+    domain=$(prompt "输入域名"); [ -n "$domain" ] || return 1
+  fi
+  
   email=$(prompt "ACME 通知邮箱" "admin@$domain"); [ -n "$email" ] || return 1
   
   printf '\n  %b选择域名证书验证方式:%b\n' "${CYAN}" "${PLAIN}"
