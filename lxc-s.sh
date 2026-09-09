@@ -800,15 +800,18 @@ render_share_uri(){
 }
 
 list_nodes(){
-  local file index=0 proto
+  local file index=0 proto node_port kind name
   NODE_COUNT=0
   for file in "$NODE_DIR"/*.json; do
     [ -e "$file" ] || continue
     index=$((index+1))
     eval "NODE_FILE_${index}=\"$file\""
-    proto=$(jq -r .proto "$file")
-    [ "$proto" = u ] && proto=UDP || proto=TCP
-    printf '  %2d. [%-14s] 端口: %-5s | %s\n' "$index" "$(jq -r .kind "$file")" "$(jq -r .port "$file")" "$(jq -r .name "$file")"
+    
+    node_port=$(jq -r '.port // .inbound.listen_port // "未知"' "$file")
+    kind=$(jq -r .kind "$file")
+    name=$(jq -r .name "$file")
+    
+    printf '  %2d. %s | %s [%s]\n' "$index" "$name" "$node_port" "$kind"
   done
   NODE_COUNT=$index
   [ "$index" = 0 ] && tell "  系统内暂无节点"
