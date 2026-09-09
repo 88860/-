@@ -1018,7 +1018,7 @@ menu_server_info(){
     tell "── $(jq -r .name "$file") [$(jq -r .kind "$file")] | 端口 $port $status"
     render_share_uri "$file"
   done
-  [ "$count" = 0 ] && tell "\n  暂无搭建好的节点"
+  [ "$count" = 0 ] && tell "\n  暂无节点"
   render_certificate_status
   wait_key
 }
@@ -1528,7 +1528,7 @@ wg_setup(){
       listen_port=$(prompt_port "u" "") || return
       break
     done
-    peer_key=$(prompt "客户端公钥")
+    peer_key=$(prompt "客户端公钥(留空稍后回填):")
     
     body=$(jq -n --arg private "$private" --arg public "$public" --arg a4 "$address4" --arg a6 "$address6" \
           --argjson port "$listen_port" --arg peer_key "$peer_key" \
