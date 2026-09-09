@@ -1578,15 +1578,51 @@ menu_wireguard(){
 }
 
 run_update(){
-  local current latest
+  local current latest script_url script_tmp
   clear
-  current=$(core_version); latest=$(remote_version)
-  tell "本地版本: $current"
+  tell "正在检测 sing-box 内核更新..."
+  current=$(core_version)
+  latest=$(remote_version)
+  tell "本地版本: ${current:-未知}"
   tell "最新版本: ${latest:-获取超时}"
-  [ -n "$latest" ] || { wait_key; return; }
-  [ "$current" = "$latest" ] && { tell_ok "已是最新"; wait_key; return; }
-  prompt_yes "更新到 $latest" || return
-  install_core && apply_config && tell_ok "更新完成"
+  
+  if [ -n "$latest" ] && [ "$current" != "$latest" ]; then
+    if prompt_yes "发现新版本 v$latest，是否立即更新"; then
+      systemctl stop sing-box >/dev/null 2>&1
+      if install_core; then
+        apply_config && tell_ok "内核更新完成"
+      else
+        apply_config_quiet
+        tell_warn "内核更新失败"
+      fi
+    fi
+  else
+    tell_ok "内核已是最新版本"
+  fi
+  out_gap
+  
+  tell "正在检测 s 脚本更新..."
+  script_url="https://raw.githubusercontent.com/88860/-/main/s.sh"
+  script_tmp=$(mktemp)
+  
+  if curl -fsSL -o "$script_tmp" -m 15 "$script_url"; then
+    if bash -n "$script_tmp" 2>/dev/null; then
+      if cmp -s "$script_tmp" "$SELF"; then
+        tell_ok "脚本已是最新版本"
+      else
+        mv -f "$script_tmp" "$SELF"
+        chmod 700 "$SELF"
+        tell_ok "脚本更新成功，请重新运行本脚本生效"
+        rm -f "$script_tmp"
+        exit 0
+      fi
+    else
+      tell_warn "下载的脚本存在语法错误，放弃更新"
+    fi
+  else
+    tell_warn "脚本更新获取失败"
+  fi
+  rm -f "$script_tmp"
   wait_key
 }
 
