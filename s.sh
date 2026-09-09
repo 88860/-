@@ -381,7 +381,7 @@ build_config(){
     dns_remote_server="2001:4860:4860::8888"
   fi
 
-    dns_block=$(jq -n --arg detour "$final" --arg host "$peer_host" --arg strategy "$strategy" \
+      dns_block=$(jq -n --arg detour "$final" --arg host "$peer_host" --arg strategy "$strategy" \
                     --arg direct_srv "$dns_direct_server" --arg remote_srv "$dns_remote_server" '
     {
       servers: [
@@ -389,21 +389,13 @@ build_config(){
           type: "udp",
           tag: "dns-direct",
           server: $direct_srv
-        }
-      ] + (if $detour == "direct" then [
+        },
         {
           type: "udp",
           tag: "dns-remote",
           server: $remote_srv
-        }
-      ] else [
-        {
-          type: "udp",
-          tag: "dns-remote",
-          server: $remote_srv,
-          detour: $detour
-        }
-      ] end),
+        } + (if $detour == "direct" then {} else {detour: $detour} end)
+      ],
       rules: [
         (if $host != "" and ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") | not) and ($host | test("^[0-9a-fA-F:]+$") | not) then
           {domain: [$host], server: "dns-direct"}
