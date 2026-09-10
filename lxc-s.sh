@@ -1687,18 +1687,11 @@ menu_wireguard(){
       4) clear
          if [ -f "$WG_CONF" ]; then render_wg_info "$WG_CONF"; wait_key
          else tell_warn "数据为空"; wait_key; fi ;;
-            5) clear
+                  5) clear
          if prompt_yes "确认删除配置"; then
-           old_json=$(cat "$WG_CONF")
            rm -f "$WG_CONF"
            [ "$(state_get exit)" = wireguard ] && state_set exit direct
-           if apply_config; then
-             tell_ok "已清除"
-           else
-             printf '%s\n' "$old_json" > "$WG_CONF"
-             apply_config_quiet
-             tell_warn "删除导致异常，已回滚"
-           fi
+           apply_config && tell_ok "已清除"
            wait_key
          fi ;;
       0) break ;;
