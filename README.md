@@ -4,3 +4,6 @@ curl -sSL -o /tmp/debian.sh https://raw.githubusercontent.com/88860/-/main/debia
 ```
 ```bash
 wget -O /root/s.sh https://raw.githubusercontent.com/88860/-/main/s.sh && chmod +x /root/s.sh && /root/s.sh
+```
+```bash
+wget -O /root/s.sh https://raw.githubusercontent.com/88860/-/main/lxc-s.sh && chmod +x /root/s.sh && /root/s.sh
