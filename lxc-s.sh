@@ -1687,11 +1687,12 @@ menu_wireguard(){
       4) clear
          if [ -f "$WG_CONF" ]; then render_wg_info "$WG_CONF"; wait_key
          else tell_warn "数据为空"; wait_key; fi ;;
-                  5) clear
+      5) clear
          if prompt_yes "确认删除配置"; then
            rm -f "$WG_CONF"
            [ "$(state_get exit)" = wireguard ] && state_set exit direct
            apply_config && tell_ok "已清除"
+           ip link del "$WG_IF" 2>/dev/null
            wait_key
          fi ;;
       0) break ;;
