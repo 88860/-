@@ -1811,7 +1811,7 @@ menu_status(){
     tell ""
     tell "  1. 检测更新"
     tell "  2. 彻底卸载"
-    tell "  0. 返回"
+    tell "  0. 退出"
     tell "${CYAN}================================${PLAIN}"
     case $(prompt "请选择") in
       1) run_update ;;
