@@ -1548,17 +1548,36 @@ peer_select(){
 
 peer_delete(){
   select_peer "删除节点" || return
-  if [ "$(jq -r .tag "$PICKED")" = "$(state_get exit)" ]; then
+  
+  local old_json previous_exit
+  old_json=$(cat "$PICKED")
+  previous_exit=$(state_get exit)
+  
+  if [ "$(jq -r .tag "$PICKED")" = "$previous_exit" ]; then
     state_set exit direct
     rm -f "$PICKED"
-    apply_config && tell_ok "已删除当前生效节点，已恢复直连"
-    ip link del "$WG_IF" 2>/dev/null
+    if apply_config; then
+      tell_ok "已删除当前生效节点，已恢复直连"
+      ip link del "$WG_IF" 2>/dev/null
+    else
+      json_save "$PICKED" "$old_json"
+      state_set exit "$previous_exit"
+      apply_config_quiet
+      tell_warn "删除导致配置异常，节点与网络出口已安全回滚"
+    fi
   else
     rm -f "$PICKED"
-    tell_ok "已删除节点"
+    if apply_config; then
+      tell_ok "已删除节点"
+    else
+      json_save "$PICKED" "$old_json"
+      apply_config_quiet
+      tell_warn "删除导致配置异常，已安全回滚"
+    fi
   fi
   wait_key
 }
+
 
 peer_stop(){
   clear
