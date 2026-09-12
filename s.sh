@@ -978,30 +978,39 @@ menu_delete_protocol(){
   select_node || return
   prompt_yes "确认删除 $(jq -r .name "$PICKED")" || return
   
-  local was_acme
+  local was_acme old_json
   was_acme=$(jq -r .tls_mode "$PICKED")
+  old_json=$(cat "$PICKED")
+  
   rm -f "$PICKED"
   
-  if [ "$was_acme" = "acme" ]; then
-    local acme_count=0
-    for f in "$NODE_DIR"/*.json; do
-      [ "$(jq -r .tls_mode "$f")" = "acme" ] && acme_count=$((acme_count+1))
-    done
-    if [ "$acme_count" -eq 0 ] && [ -n "$(state_get domain)" ]; then
-      out_gap
-      if prompt_yes "是否连同域名和证书一起清理"; then
-        state_set domain ""
-        state_set email ""
-        state_set challenge "http"
-        rm -rf "$ACME_DIR"/*
-        tell_ok "相关配置已清理"
+  if apply_config; then
+    tell_ok "已删除"
+    
+    if [ "$was_acme" = "acme" ]; then
+      local acme_count=0
+      for f in "$NODE_DIR"/*.json; do
+        [ "$(jq -r .tls_mode "$f")" = "acme" ] && acme_count=$((acme_count+1))
+      done
+      if [ "$acme_count" -eq 0 ] && [ -n "$(state_get domain)" ]; then
+        out_gap
+        if prompt_yes "是否连同域名和证书一起清理"; then
+          state_set domain ""
+          state_set email ""
+          state_set challenge "http"
+          rm -rf "$ACME_DIR"/*
+          tell_ok "相关配置已清理"
+        fi
       fi
     fi
+  else
+    json_save "$PICKED" "$old_json"
+    apply_config_quiet
+    tell_warn "删除导致配置异常，已安全回滚"
   fi
-
-  apply_config && tell_ok "已删除"
   wait_key
 }
+
 
 menu_modify_protocol(){
   local kind value other current_hop up_mbps down_mbps obfs_type obfs_password
