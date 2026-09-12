@@ -1981,42 +1981,6 @@ menu_status(){
   done
 }
 
-menu_server(){
-  while :; do
-    clear
-    tell "${CYAN}========== 服务端管理 ==========${PLAIN}"
-    tell "  1. 创建协议"
-    tell "  2. 删除协议"
-    tell "  3. 修改配置"
-    tell "  4. 服务端信息"
-    tell "  5. 更换域名"
-    tell "  6. 重启服务"
-    tell "  7. 停止服务"
-    tell "  0. 返回"
-    tell "${CYAN}================================${PLAIN}"
-    case $(prompt "请选择") in
-      1) menu_create_protocol ;;
-      2) menu_delete_protocol ;;
-      3) menu_modify_protocol ;;
-      4) menu_server_info ;;
-      5) menu_change_domain ;;
-      6) 
-         rc-service sing-box restart >/dev/null 2>&1
-         if rc-service sing-box status >/dev/null 2>&1; then
-           tell_ok "已重启"
-         else
-           tell_warn "singbox 未运行"
-           tell_warn "重启失败"
-         fi
-         wait_key
-         ;;
-      7) if rc-service sing-box stop >/dev/null 2>&1; then tell_ok "已停止"; else tell_warn "操作异常"; fi; wait_key ;;
-      0) break ;;
-      *) tell_warn "输入无效，请重新选择"; sleep 1 ;;
-    esac
-  done
-}
-
 bootstrap(){
   init_dirs
   check_dependencies
