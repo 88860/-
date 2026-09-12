@@ -1859,7 +1859,11 @@ wg_toggle(){
   role=$(jq -r .role "$WG_CONF"); previous=$(state_get exit)
   if [ "$(jq -r .enabled "$WG_CONF")" = true ]; then
     json_edit "$WG_CONF" '.enabled=false'
-    [ "$previous" = wireguard ] && state_set exit direct
+    if [ "$previous" = "wireguard" ]; then
+      disarm_watchdog
+      state_set exit direct
+    fi
+    
     apply_config && tell_ok "已关闭隧道"
   else
     [ -n "$(jq -r .peer_public_key "$WG_CONF")" ] || { tell_warn "缺少公钥"; wait_key; return; }
@@ -1877,6 +1881,7 @@ wg_toggle(){
   fi
   wait_key
 }
+
 
 menu_wireguard(){
   local role_label tunnel_label
