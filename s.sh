@@ -1586,6 +1586,7 @@ peer_delete(){
   previous_exit=$(state_get exit)
   
   if [ "$(jq -r .tag "$PICKED")" = "$previous_exit" ]; then
+    disarm_watchdog
     state_set exit direct
     rm -f "$PICKED"
     if apply_config; then
@@ -1594,6 +1595,7 @@ peer_delete(){
     else
       json_save "$PICKED" "$old_json"
       state_set exit "$previous_exit"
+      arm_watchdog
       apply_config_quiet
       tell_warn "删除导致配置异常，节点与网络出口已安全回滚"
     fi
@@ -1610,8 +1612,10 @@ peer_delete(){
   wait_key
 }
 
+
 peer_stop(){
   clear
+  disarm_watchdog
   state_set exit direct
   apply_config && tell_ok "已恢复直连"
   wait_key
