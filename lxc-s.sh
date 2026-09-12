@@ -1384,12 +1384,12 @@ list_peers(){
       eval "PEER_FILE_${idx}=\"$file\""; eval "PEER_TAG_${idx}=\"$tag\""
       eval "PEER_TYPE_${idx}=\"$type\""; eval "PEER_NAME_${idx}=\"$name\""; eval "PEER_PORT_${idx}=\"$port\""
       
-      (
+            (
         local ms="" ping_res
         if echo "$host" | grep -q ":"; then
-          ping_res=$(ping6 -c 1 -W 2 "$host" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/{print $5}')
+          ping_res=$(ping6 -c 1 -W 2 "$host" 2>/dev/null | awk '/^rtt|^round-trip/{split($4, a, "/"); print a[2]}')
         else
-          ping_res=$(ping -c 1 -W 2 "$host" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/{print $5}')
+          ping_res=$(ping -c 1 -W 2 "$host" 2>/dev/null | awk '/^rtt|^round-trip/{split($4, a, "/"); print a[2]}')
         fi
 
         if [ -n "$ping_res" ]; then
