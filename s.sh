@@ -512,30 +512,16 @@ apply_config(){
 apply_config_quiet(){
   apply_config >/dev/null 2>&1
 }
-
-arm_watchdog(){
-  local wd_service="/etc/systemd/system/sbm-watchdog.service"
-  if [ ! -f "$wd_service" ]; then
-    systemctl stop sbm-watchdog.timer sbm-watchdog.service 2>/dev/null
-    systemctl reset-failed 'sbm-watchdog*' 2>/dev/null
-    
-    cat >"$wd_service" <<EOF
-[Unit]
-Description=SBM Watchdog Service
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash $SELF --watchdog
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
+stop_watchdog(){
+  if [ -f "$WATCHDOG_PID" ]; then
+    kill -9 "$(cat "$WATCHDOG_PID")" 2>/dev/null || true
+    rm -f "$WATCHDOG_PID"
   fi
-  systemctl enable --now sbm-watchdog.service >/dev/null 2>&1 || out_warn "看门狗部署失败"
+}
+arm_watchdog(){
+  stop_watchdog
+  run_watchdog </dev/null >/dev/null 2>&1 &
+  echo $! > "$WATCHDOG_PID"
 }
 
 run_watchdog(){
