@@ -544,9 +544,10 @@ run_watchdog(){
   
   while :; do
     sleep 120
-    local proxy_env=""
+    local current_exit; current_exit=$(state_get exit)
     
-    if [ "$(state_get exit)" = "direct" ] && [ "$target_exit" != "direct" ]; then
+    local proxy_env=""
+    if [ "$current_exit" = "direct" ] && [ "$target_exit" != "direct" ]; then
       proxy_env="http://127.0.0.1:2081"
     fi
     
@@ -554,7 +555,7 @@ run_watchdog(){
       if env http_proxy="$proxy_env" curl -s -o /dev/null --connect-timeout 4 -m 6 "$PROBE_URL" || \
          env http_proxy="$proxy_env" curl -s -o /dev/null --connect-timeout 4 -m 6 "$probe2"; then
         fail_count=0
-        if [ "$(state_get exit)" = "direct" ] && [ "$target_exit" != "direct" ]; then
+        if [ "$current_exit" = "direct" ] && [ "$target_exit" != "direct" ]; then
           state_set exit "$target_exit"
           build_config | json_write "$CONFIG" && systemctl restart sing-box
           sync_bypass_rules
@@ -569,7 +570,7 @@ run_watchdog(){
         fail_count=0
       else
         fail_count=$((fail_count+1))
-        if [ "$fail_count" -ge 3 ] && [ "$(state_get exit)" != "direct" ]; then
+        if [ "$fail_count" -ge 3 ] && [ "$current_exit" != "direct" ]; then
           state_set exit direct
           WATCHDOG_PROBE="$target_exit" build_config | json_write "$CONFIG" && systemctl restart sing-box
           sync_bypass_rules
@@ -579,6 +580,7 @@ run_watchdog(){
     fi
   done
 }
+
 
 validate_port(){
   local port=$1 proto=$2 allow=${3:-}
