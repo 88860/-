@@ -536,22 +536,24 @@ run_watchdog(){
   
   while :; do
     sleep 120
+    local current_exit; current_exit=$(state_get exit)
+    
     local probe_port=2080
-    if [ "$(state_get exit)" = "direct" ] && [ "$target_exit" != "direct" ]; then
+    if [ "$current_exit" = "direct" ] && [ "$target_exit" != "direct" ]; then
       probe_port=2081
     fi
     
     if env http_proxy="http://127.0.0.1:${probe_port}" wget -q -O /dev/null -T 6 "$PROBE_URL" || \
        env http_proxy="http://127.0.0.1:${probe_port}" wget -q -O /dev/null -T 6 "$probe2"; then
       fail_count=0
-      if [ "$(state_get exit)" = "direct" ] && [ "$target_exit" != "direct" ]; then
+      if [ "$current_exit" = "direct" ] && [ "$target_exit" != "direct" ]; then
         state_set exit "$target_exit"
         build_config | json_write "$CONFIG" && rc-service sing-box restart
         sync_proxy_env
       fi
     else
       fail_count=$((fail_count+1))
-      if [ "$fail_count" -ge 3 ] && [ "$(state_get exit)" != "direct" ]; then
+      if [ "$fail_count" -ge 3 ] && [ "$current_exit" != "direct" ]; then
         state_set exit direct
         WATCHDOG_PROBE="$target_exit" build_config | json_write "$CONFIG" && rc-service sing-box restart
         sync_proxy_env
@@ -559,6 +561,7 @@ run_watchdog(){
     fi
   done
 }
+
 
 validate_port(){
   local port=$1 proto=$2 allow=${3:-}
