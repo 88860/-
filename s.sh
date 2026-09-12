@@ -1279,30 +1279,8 @@ list_peers(){
   set -- "$PEER_DIR"/*.json
   [ ! -e "$1" ] && { clear; tell "${CYAN}========== $title ==========${PLAIN}"; tell "  暂无外部节点"; return 0; }
   
-  local tmp_dir sb_conf sb_pid
+  local tmp_dir
   tmp_dir=$(mktemp -d)
-  sb_conf="$tmp_dir/test.json"
-  
-  local dir_port=19999 base_port=20000
-  while ss -Hlntu 2>/dev/null | grep -q ":$dir_port\b"; do dir_port=$((dir_port+1)); done
-  while ss -Hlntu 2>/dev/null | grep -q ":$base_port\b"; do base_port=$((base_port+100)); done
-  
-  jq -s --argjson dp "$dir_port" --argjson bp "$base_port" '
-    [ range(0; length) as $i | .[$i].outbound | .tag = "peer-\($i+1)" | .routing_mark = 255 ] as $outs |
-    [ range(0; length) as $i | {type:"socks",tag:"in-\($i+1)",listen:"127.0.0.1",listen_port:($bp+$i+1)} ] as $ins |
-    [ range(0; length) as $i | {inbound:["in-\($i+1)"],action:"route",outbound:"peer-\($i+1)"} ] as $rules |
-    {
-      log: {level: "fatal"},
-      dns: {servers:[{type:"udp",tag:"dns-direct",server:"223.5.5.5",detour:"direct"}], rules:[], final:"dns-direct"},
-      inbounds: ($ins + [{type:"socks",tag:"in-direct",listen:"127.0.0.1",listen_port:$dp}]),
-      outbounds: ($outs + [{type:"direct",tag:"direct",routing_mark:255}]),
-      route: {rules: ($rules + [{inbound:["in-direct"],action:"route",outbound:"direct"}]), final: "direct"}
-    }
-  ' "$@" > "$sb_conf" 2>/dev/null
-  
-  "$CORE" run -c "$sb_conf" >/dev/null 2>&1 &
-  sb_pid=$!
-  sleep 0.5
   
   local idx=0 raw_data old_ifs test_pids=""
   raw_data=$(jq -r '"\(input_filename)|\(.tag//"-")|\(.outbound.type//"-")|\(.name//"-")|\(.outbound.server_port // (if .outbound.server_ports then (.outbound.server_ports[0]|gsub(":";"-")) else null end) // .outbound.listen_port // "-")|\(.outbound.server//"-")"' "$@" 2>/dev/null)
@@ -1316,34 +1294,13 @@ list_peers(){
       eval "PEER_TYPE_${idx}=\"$type\""; eval "PEER_NAME_${idx}=\"$name\""; eval "PEER_PORT_${idx}=\"$port\""
       
       (
-        local ms="" res proxy_port=$((base_port+idx))
+        local ms="" ping_res
+        ping_res=$(ping -c 1 -W 2 -m 255 "$host" 2>/dev/null | awk -F'/' '/^rtt|^round-trip/{print $5}')
         
-        if [ "$type" != "hysteria2" ] && [ "$type" != "tuic" ]; then
-          res=$(curl -x socks5h://127.0.0.1:$dir_port -w "%{time_pretransfer}" -s -o /dev/null -m 2 "http://$host:$port" 2>/dev/null)
-        fi
-        
-        if [ -z "$res" ] || [ "$res" = "0.000" ]; then
-           res=$(curl -x socks5h://127.0.0.1:$dir_port -w "%{time_pretransfer}" -s -o /dev/null -m 2 "http://$host:22" 2>/dev/null)
-        fi
-        
-        if [ -z "$res" ] || [ "$res" = "0.000" ]; then
-           res=$(curl -x socks5h://127.0.0.1:$dir_port -w "%{time_pretransfer}" -s -o /dev/null -m 2 "http://$host:443" 2>/dev/null)
-        fi
-        
-        if [ -n "$res" ] && [ "$res" != "0.000" ]; then
-          ms=$(awk "BEGIN {print int($res * 1000)}")
+        if [ -n "$ping_res" ]; then
+          ms=$(awk "BEGIN {print int($ping_res)}")
         else
-          if [ "$type" = "hysteria2" ] || [ "$type" = "tuic" ]; then
-            local proxy_res
-            proxy_res=$(curl -x socks5h://127.0.0.1:$proxy_port -s -o /dev/null -w "%{time_total}" -m 2.5 "http://cp.cloudflare.com/generate_204")
-            if [ -n "$proxy_res" ] && [ "$proxy_res" != "0.000" ]; then
-              ms=$(awk "BEGIN {print int($proxy_res * 1000)}")
-            else
-              ms="fail"
-            fi
-          else
-            ms="fail"
-          fi
+          ms="fail"
         fi
         
         echo "$ms" > "$tmp_dir/res_$idx"
@@ -1355,9 +1312,6 @@ list_peers(){
   PEER_COUNT=$idx
   
   [ -n "$test_pids" ] && wait $test_pids 2>/dev/null
-  
-  kill $sb_pid 2>/dev/null
-  wait $sb_pid 2>/dev/null
   
   clear
   tell "${CYAN}========== $title ==========${PLAIN}"
@@ -1379,7 +1333,7 @@ list_peers(){
     
     [ "$tag" = "$current" ] && mark=" ${BLUE}<=当前${color}" || mark=""
     
-    printf "  %b%2d. [%-9s] %s | 端口:%s%s %s%b\n" "$color" "$i" "$type" "$name" "$port" "$mark" "$status_text" "$PLAIN"
+    printf "  %b%2d. [%-9s] %s | 端口:%-11s%b %s%b\n" "$color" "$i" "$type" "$name" "$port" "$mark" "$status_text" "$PLAIN"
   done
   rm -rf "$tmp_dir"
   return 0
