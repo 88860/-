@@ -1496,7 +1496,6 @@ peer_select(){
   fi
   wait_key
 }
-
 peer_delete(){
   clear; tell "${CYAN}========== 删除节点 ==========${PLAIN}"
   select_peer || return
@@ -1506,6 +1505,7 @@ peer_delete(){
   previous_exit=$(state_get exit)
   
   if [ "$(jq -r .tag "$PICKED")" = "$previous_exit" ]; then
+    disarm_watchdog
     state_set exit direct
     rm -f "$PICKED"
     if apply_config; then
@@ -1513,6 +1513,7 @@ peer_delete(){
     else
       json_save "$PICKED" "$old_json"
       state_set exit "$previous_exit"
+      arm_watchdog
       apply_config_quiet
       tell_warn "删除导致配置异常，节点与网络出口已安全回滚"
     fi
@@ -1528,9 +1529,9 @@ peer_delete(){
   fi
   wait_key
 }
-
 peer_stop(){
   clear
+  disarm_watchdog
   state_set exit direct
   if apply_config; then
     tell_ok "已恢复直连"
