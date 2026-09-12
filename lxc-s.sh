@@ -522,12 +522,20 @@ apply_config_quiet(){
 }
 
 arm_watchdog(){
+arm_watchdog(){
   if [ -f "$WATCHDOG_PID" ]; then
     kill -9 "$(cat "$WATCHDOG_PID")" 2>/dev/null || true
     rm -f "$WATCHDOG_PID"
   fi
   run_watchdog </dev/null >/dev/null 2>&1 &
   echo $! > "$WATCHDOG_PID"
+}
+
+disarm_watchdog(){
+  if [ -f "$WATCHDOG_PID" ]; then
+    kill -9 "$(cat "$WATCHDOG_PID")" 2>/dev/null || true
+    rm -f "$WATCHDOG_PID"
+  fi
 }
 
 run_watchdog(){
@@ -537,6 +545,11 @@ run_watchdog(){
   while :; do
     sleep 120
     local current_exit; current_exit=$(state_get exit)
+    
+    if [ "$current_exit" = "direct" ] && [ "$target_exit" = "direct" ]; then
+      fail_count=0
+      continue
+    fi
     
     local probe_port=2080
     if [ "$current_exit" = "direct" ] && [ "$target_exit" != "direct" ]; then
@@ -561,7 +574,6 @@ run_watchdog(){
     fi
   done
 }
-
 
 validate_port(){
   local port=$1 proto=$2 allow=${3:-}
