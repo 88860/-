@@ -1542,14 +1542,16 @@ wg_client_active(){
 
 peer_select(){
   local tag previous
-  select_peer "接管/选择节点" || return
+  clear; tell "${CYAN}========== 节点选择 ==========${PLAIN}"
+  select_peer || return
   tag=$(jq -r .tag "$PICKED"); previous=$(state_get exit)
   if wg_client_active; then
     prompt_yes "WireGuard 隧道运行中，是否断开" || return
     json_edit "$WG_CONF" '.enabled=false'
   fi
-  arm_watchdog; state_set exit "$tag"
+  state_set exit "$tag"
   if apply_config; then
+    arm_watchdog
     tell_ok "已接管: $(jq -r .name "$PICKED")"
   else
     state_set exit "$previous"
@@ -1560,18 +1562,19 @@ peer_select(){
 }
 
 peer_delete(){
-  select_peer "删除节点" || return
+  clear; tell "${CYAN}========== 删除节点 ==========${PLAIN}"
+  select_peer || return
   
   local old_json previous_exit
   old_json=$(cat "$PICKED")
   previous_exit=$(state_get exit)
   
   if [ "$(jq -r .tag "$PICKED")" = "$previous_exit" ]; then
+    stop_watchdog
     state_set exit direct
     rm -f "$PICKED"
     if apply_config; then
       tell_ok "已删除当前生效节点，已恢复直连"
-      ip link del "$WG_IF" 2>/dev/null
     else
       json_save "$PICKED" "$old_json"
       state_set exit "$previous_exit"
@@ -1593,8 +1596,11 @@ peer_delete(){
 
 peer_stop(){
   clear
+  stop_watchdog
   state_set exit direct
-  apply_config && tell_ok "已恢复直连"
+  if apply_config; then
+    tell_ok "已恢复直连"
+  fi
   wait_key
 }
 
