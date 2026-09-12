@@ -1472,7 +1472,8 @@ list_peers(){
         [ "$tag" = "$current" ] && mark=" ${CYAN}<=当前${color}" || mark=""
 
     
-    printf "  %b%2d. [%-7s] %s:%s %s %s%b\n" "$color" "$i" "$type" "$name" "$port" "$mark" "$status_text" "$PLAIN"
+        printf "  %b%2d. [%-7s] %s:%s %b %s%b\n" "$color" "$i" "$type" "$name" "$port" "$mark" "$status_text" "$PLAIN"
+
   done
   rm -rf "$tmp_dir"
   return 0
