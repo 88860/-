@@ -537,6 +537,9 @@ EOF
   fi
   systemctl enable --now sbm-watchdog.service >/dev/null 2>&1 || out_warn "看门狗部署失败"
 }
+disarm_watchdog(){
+  systemctl disable --now sbm-watchdog.service >/dev/null 2>&1 || true
+}
 
 run_watchdog(){
   local fail_count=0 probe2="http://captive.apple.com/hotspot-detect.html"
