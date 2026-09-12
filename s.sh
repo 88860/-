@@ -897,10 +897,14 @@ render_share_uri(){
 }
 
 list_nodes(){
-  local index=0 proto raw_data old_ifs
+  local index=0 raw_data old_ifs tcp_list udp_list
   NODE_COUNT=0
   set -- "$NODE_DIR"/*.json
   [ ! -e "$1" ] && { tell "  系统内暂无节点"; return 0; }
+  
+  tcp_list=$(listening_ports t)
+  udp_list=$(listening_ports u)
+  
   raw_data=$(jq -r '"\(input_filename)|\(.kind//"-")|\(.port//"-")|\(.name//"-")|\(.proto//"-")"' "$@" 2>/dev/null)
   if [ -n "$raw_data" ]; then
     old_ifs="$IFS"
@@ -908,8 +912,15 @@ list_nodes(){
     while read -r file kind port name proto; do
       index=$((index+1))
       eval "NODE_FILE_${index}=\"$file\""
-      [ "$proto" = "u" ] && proto=UDP || proto=TCP
-      printf '  %2d. [%-14s] 端口: %-5s | %s\n' "$index" "$kind" "$port" "$name"
+      
+      local status_text color
+      if [ "$proto" = "u" ]; then
+        grep -qx "$port" <<<"$udp_list" && { color="$GREEN"; status_text="[正常]"; } || { color="$RED"; status_text="[异常]"; }
+      else
+        grep -qx "$port" <<<"$tcp_list" && { color="$GREEN"; status_text="[正常]"; } || { color="$RED"; status_text="[异常]"; }
+      fi
+      
+      printf "  %b%2d. [%-13s] %s:%s %b%s%b\n" "$GREEN" "$index" "$kind" "$name" "$port" "$color" "$status_text" "$PLAIN"
     done <<<"$raw_data"
     IFS="$old_ifs"
   fi
