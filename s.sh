@@ -1863,6 +1863,11 @@ menu_wireguard(){
          if [ -f "$WG_CONF" ]; then render_wg_info "$WG_CONF"; wait_key
          else tell_warn "数据为空"; wait_key; fi ;;
       5) clear
+         if [ ! -f "$WG_CONF" ]; then
+           tell_warn "未配置 WireGuard，无需删除"
+           wait_key
+           continue
+         fi
          if prompt_yes "确认删除配置"; then
            local wg_backup prev_exit
            wg_backup=$(cat "$WG_CONF")
