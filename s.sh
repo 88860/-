@@ -549,6 +549,11 @@ run_watchdog(){
     sleep 120
     local current_exit; current_exit=$(state_get exit)
     
+    if [ "$current_exit" = "direct" ] && [ "$target_exit" = "direct" ]; then
+      fail_count=0
+      continue
+    fi
+    
     local proxy_env=""
     if [ "$current_exit" = "direct" ] && [ "$target_exit" != "direct" ]; then
       proxy_env="http://127.0.0.1:2081"
@@ -583,7 +588,6 @@ run_watchdog(){
     fi
   done
 }
-
 
 validate_port(){
   local port=$1 proto=$2 allow=${3:-}
