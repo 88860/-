@@ -1780,7 +1780,10 @@ wg_toggle(){
   role=$(jq -r .role "$WG_CONF"); previous=$(state_get exit)
   if [ "$(jq -r .enabled "$WG_CONF")" = true ]; then
     json_edit "$WG_CONF" '.enabled=false'
-    [ "$previous" = wireguard ] && state_set exit direct
+    if [ "$previous" = "wireguard" ]; then
+      disarm_watchdog
+      state_set exit direct
+    fi
     if apply_config; then
       tell_ok "已关闭隧道"
     fi
@@ -2032,9 +2035,16 @@ bootstrap(){
 }
 
 case $1 in
-  --sync) init_dirs; sync_proxy_env; exit 0 ;;
+  --sync) 
+    init_dirs
+    sync_proxy_env
+    if [ "$(state_get exit)" != "direct" ]; then
+      arm_watchdog
+    fi
+    exit 0 ;;
   --watchdog) run_watchdog ;;
 esac
+
 
 bootstrap
 
