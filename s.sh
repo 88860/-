@@ -1469,7 +1469,8 @@ list_peers(){
       color="$YELLOW"; status_text="[${ms}ms]"
     fi
     
-    [ "$tag" = "$current" ] && mark="[当前]" || mark=""
+        [ "$tag" = "$current" ] && mark=" ${CYAN}<=当前${color}" || mark=""
+
     
     printf "  %b%2d. [%-7s] %s:%s %s %s%b\n" "$color" "$i" "$type" "$name" "$port" "$mark" "$status_text" "$PLAIN"
   done
