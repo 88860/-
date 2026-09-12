@@ -1842,16 +1842,22 @@ wg_toggle(){
   role=$(jq -r .role "$WG_CONF"); previous=$(state_get exit)
   if [ "$(jq -r .enabled "$WG_CONF")" = true ]; then
     json_edit "$WG_CONF" '.enabled=false'
-    [ "$previous" = wireguard ] && state_set exit direct
-    apply_config && tell_ok "已关闭隧道"
+    if [ "$previous" = wireguard ]; then
+      state_set exit direct
+      stop_watchdog
+    fi
+    if apply_config; then
+      tell_ok "已关闭隧道"
+    fi
   else
     [ -n "$(jq -r .peer_public_key "$WG_CONF")" ] || { tell_warn "缺少公钥"; wait_key; return; }
     if [ "$role" = client ] && [ "$previous" != direct ]; then
       prompt_yes "隧道将接管网络，确定" || return
     fi
     json_edit "$WG_CONF" '.enabled=true'
-    if [ "$role" = client ]; then arm_watchdog; state_set exit wireguard; fi
+    if [ "$role" = client ]; then state_set exit wireguard; fi
     if apply_config; then
+      if [ "$role" = client ]; then arm_watchdog; fi
       sleep 3; render_wg_info "$WG_CONF"
     else
       json_edit "$WG_CONF" '.enabled=false'; state_set exit "$previous"
@@ -1860,7 +1866,6 @@ wg_toggle(){
   fi
   wait_key
 }
-
 menu_wireguard(){
   local role_label tunnel_label
   while :; do
