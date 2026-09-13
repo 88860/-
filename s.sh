@@ -288,6 +288,21 @@ build_config(){
     if [ -n "$domain" ]; then
       providers=$(jq -n --argjson a "$(acme_provider "$domain")" '[$a]')
       tls_extra=$(jq -n --arg t "$CERT_TAG" '{certificate_provider:$t}')
+build_config(){
+  local selected domain inbounds outbounds endpoints rules dns_block final use_tun
+  local peer_host node_files tls_extra providers strategy ipv6
+
+  selected=$(state_get exit); domain=$(state_get domain)
+  final=direct; use_tun=0; endpoints='[]'; peer_host=""; providers='[]'; tls_extra='{}'
+
+  load_network_env
+  [ -n "$PRIMARY_V6" ] && strategy=prefer_ipv4 || strategy=ipv4_only
+  node_files=("$NODE_DIR"/*.json); inbounds='[]'
+
+  if [ ${#node_files[@]} -gt 0 ]; then
+    if [ -n "$domain" ]; then
+      providers=$(jq -n --argjson a "$(acme_provider "$domain")" '[$a]')
+      tls_extra=$(jq -n --arg t "$CERT_TAG" '{certificate_provider:$t}')
     fi
     inbounds=$(jq -s --arg d "$domain" --argjson x "$tls_extra" '
       [ .[] | .inbound as $in |
@@ -326,7 +341,9 @@ build_config(){
     + [{ip_is_private:true,action:"route",outbound:"direct"}]')
 
   local ssh_port; ssh_port=$(ssh_ports | head -1)
-  [ -n "$ssh_port" ] && rules=$(jq -n --argjson r "$rules" --arg p "$ssh_port" '$r + [{port:$p,action:"route",outbound:"direct"}]')
+  if [ -n "$ssh_port" ] && [[ "$ssh_port" =~ ^[0-9]+$ ]]; then
+    rules=$(jq -n --argjson r "$rules" --argjson p "$ssh_port" '$r + [{port:$p,action:"route",outbound:"direct"}]')
+  fi
 
   dns_block=$(jq -n --arg detour "$final" --arg host "$peer_host" --arg strategy "$strategy" --arg direct_srv "$dns_direct_server" --arg remote_srv "$dns_remote_server" '
     {
