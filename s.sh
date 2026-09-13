@@ -397,11 +397,58 @@ build_config(){
     peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
   fi
   
+build_config(){
+  local selected domain inbounds outbounds endpoints rules dns_block final use_tun
+  local peer_host node_files tls_extra providers strategy ipv6
+
+  selected=$(state_get exit); domain=$(state_get domain)
+  final=direct; use_tun=0; endpoints='[]'; peer_host=""; providers='[]'; tls_extra='{}'
+
+  ipv6=$(local_ipv6); strategy=ipv4_only; [ -n "$ipv6" ] && strategy=prefer_ipv4
+  node_files=("$NODE_DIR"/*.json)
+  inbounds='[]'
+
+  if [ ${#node_files[@]} -gt 0 ]; then
+    if [ -n "$domain" ]; then
+      if use_cert_provider; then
+        providers=$(jq -n --arg t "$CERT_TAG" --argjson a "$(acme_options "$domain")" '[$a+{type:"acme",tag:$t}]')
+        tls_extra=$(jq -n --arg t "$CERT_TAG" '{certificate_provider:$t}')
+      else
+        tls_extra=$(jq -n --argjson a "$(acme_options "$domain")" '{acme:$a}')
+      fi
+    fi
+    inbounds=$(jq -s --arg d "$domain" --argjson x "$tls_extra" '
+      [ .[] | .inbound as $in |
+        if .tls_mode=="acme" then
+          $in * {tls: ({enabled:true,server_name:$d}
+                       + (if .alpn then {alpn:.alpn} else {} end)
+                       + $x)}
+        else $in end ]' "${node_files[@]}") || return 1
+  fi
+
+  outbounds='[{"type":"direct","tag":"direct"}]'
+
+  if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
+    endpoints=$(jq '[.endpoint]' "$WG_CONF")
+    if [ "$(jq -r .role "$WG_CONF")" = client ]; then
+      peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
+      outbounds=$(jq -n --argjson base "$outbounds" --arg wg "$WG_IF" \
+        '$base + [{"type":"direct","tag":"wg-direct","bind_interface":$wg}]')
+      [ "$selected" = wireguard ] && { final="wg-direct"; use_tun=1; }
+    fi
+  fi
+
+  if [ "$selected" != direct ] && [ "$selected" != wireguard ] && [ -f "$PEER_DIR/$selected.json" ]; then
+    outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$selected.json" '$base + [$peer[0].outbound]')
+    final=$selected; use_tun=1
+    peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
+  fi
+
   [ "$use_tun" = 1 ] && inbounds=$(jq -n --argjson list "$inbounds" --arg name "$TUN_IF" '
     [{type:"tun",tag:"tun-in",interface_name:$name,
       address:["172.19.0.1/30","fdfe:dcba:9876::1/126"],
-      auto_route:true,strict_route:true,dns_mode:"auto",stack:"mixed",mtu:9000}] + $list')
-      
+      auto_route:true,strict_route:true,dns_mode:"hijack",stack:"mixed",mtu:9000}] + $list')
+
   local dns_direct_server="1.1.1.1"
   local dns_remote_server="8.8.8.8"
   if [ -z "$(local_ipv4)" ] && [ -n "$(local_ipv6)" ]; then
@@ -413,13 +460,13 @@ build_config(){
     [{action:"sniff"},
      {protocol:"dns",action:"hijack-dns"},
      {port:53,action:"hijack-dns"}]
-    + (if $host=="" then [] 
-       elif ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")) then 
+    + (if $host=="" then []
+       elif ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")) then
          [{ip_cidr:[($host+"/32")],action:"route",outbound:"direct"}]
-       elif ($host | test("^[0-9a-fA-F:]+$")) then 
+       elif ($host | test("^[0-9a-fA-F:]+$")) then
          [{ip_cidr:[($host+"/128")],action:"route",outbound:"direct"}]
-       else 
-         [{domain:[$host],action:"route",outbound:"direct"}] 
+       else
+         [{domain:[$host],action:"route",outbound:"direct"}]
        end)
     + [{ip_cidr:[(if ($dds | contains(":")) then ($dds+"/128") else ($dds+"/32") end)],action:"route",outbound:"direct"}]
     + [{ip_is_private:true,action:"route",outbound:"direct"}]')
@@ -433,21 +480,22 @@ build_config(){
           tag: "dns-direct",
           server: $direct_srv
         },
-        (if $detour == "direct" then
-          { type: "udp", tag: "dns-remote", server: $remote_srv }
-        else
-          { type: "udp", tag: "dns-remote", server: $remote_srv, detour: $detour }
-        end)
+        {
+          type: "udp",
+          tag: "dns-remote",
+          server: $remote_srv,
+          detour: "direct"
+        }
       ],
       rules: [
         (if $host != "" and ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") | not) and ($host | test("^[0-9a-fA-F:]+$") | not) then
           {domain: [$host], server: "dns-direct"}
         else empty end)
       ],
-      final: "dns-remote"
+      final: "dns-direct"
     }
     | if $detour=="direct" then . else .strategy=$strategy end')
-     
+
   jq -n --argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
         --argjson endpoints "$endpoints" --argjson rules "$rules" \
         --argjson dns "$dns_block" --argjson providers "$providers" \
