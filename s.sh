@@ -1923,28 +1923,15 @@ uri_to_outbound(){
 }
 
 peer_add(){
-  local name uri tag outbound probe ipv4 ipv6 domain port ip resolved_hosts
+  local name uri tag outbound probe
   clear; tell "${CYAN}========== 添加节点 ==========${PLAIN}"
   name=$(prompt "识别名称" "RemoteNode"); [ -n "$name" ] || return
   uri=$(prompt "节点链接"); [ -n "$uri" ] || return
   parse_uri "$uri"
-  ipv4=$(local_ipv4); ipv6=$(local_ipv6); domain=$(state_get domain)
-  resolved_hosts=$(resolve_addresses "$URI_HOST")
-  for port in $(node_ports); do
-    if [ "$URI_PORT" = "$port" ]; then
-      if [ "$URI_HOST" = "127.0.0.1" ] || [ "$URI_HOST" = "localhost" ] || [ "$URI_HOST" = "::1" ]; then
-        tell_warn "禁止自环接入"; wait_key; return
-      fi
-      for ip in $resolved_hosts; do
-        if [ "$ip" = "$ipv4" ] || [ "$ip" = "$ipv6" ]; then
-          tell_warn "禁止自环接入"; wait_key; return
-        fi
-      done
-      if [ -n "$domain" ] && [ "$URI_HOST" = "$domain" ]; then
-        tell_warn "禁止自环接入"; wait_key; return
-      fi
-    fi
-  done
+  if is_self_target "$URI_HOST"; then
+    tell_warn "禁止自环接入: $URI_HOST 指向本机"
+    wait_key; return
+  fi
   tag=$(unique_tag "$name" out- "$PEER_DIR")
   outbound=$(uri_to_outbound "$tag") || { tell_warn "无法解析"; wait_key; return; }
   probe=$(mktemp)
