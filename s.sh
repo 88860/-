@@ -738,7 +738,7 @@ build_config(){
                     --arg remote_v6 "$dns_remote_v6_server" '
     {
       servers: ([
-        { type: "udp", tag: "dns-direct", server: $direct_srv, detour: "direct" },
+        { type: "udp", tag: "dns-direct", server: $direct_srv },
         (if $detour == "direct" then
           { type: "udp", tag: "dns-remote", server: $remote_srv }
         else
