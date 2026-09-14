@@ -1559,7 +1559,7 @@ menu_modify_protocol(){
           if [ "$up_mbps" -gt 0 ] || [ "$down_mbps" -gt 0 ]; then
             json_edit "$PICKED" '
               .meta.up_mbps=$up | .meta.down_mbps=$down |
-              .meta.bbr_profile="" |
+              del(.meta.bbr_profile) |
               if $up > 0 then .inbound.up_mbps=$up else del(.inbound.up_mbps) end |
               if $down > 0 then .inbound.down_mbps=$down else del(.inbound.down_mbps) end |
               del(.inbound.bbr_profile)
