@@ -778,6 +778,7 @@ build_config(){
 }
 
 apply_config(){
+apply_config(){
   local tmp error line guard=0 prev_conf=""
   tmp=$(mktemp)
   TMP_FILES="$TMP_FILES $tmp"
@@ -794,6 +795,11 @@ apply_config(){
     rm -f "$tmp"; return 1
   fi
   install -m600 "$tmp" "$CONFIG"; rm -f "$tmp"
+  
+  sync_bypass_rules
+  sync_hopping_rules
+  bypass_rules_present || out_warn "系统内核不支持 sport 路由规则，服务可能中断"
+  
   if ! timeout 15 systemctl reload-or-restart sing-box >/dev/null 2>&1; then
     out_warn "sing-box 重载/重启失败，正在回滚配置"
     if [ -n "$prev_conf" ] && [ -s "$prev_conf" ]; then
@@ -819,9 +825,7 @@ apply_config(){
     fi
     return 1
   fi
-  sync_bypass_rules
-  sync_hopping_rules
-  bypass_rules_present || out_warn "系统内核不支持 sport 路由规则，服务可能中断"
+  
   return 0
 }
 
