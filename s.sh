@@ -1145,7 +1145,8 @@ create_hysteria2(){
         --arg bbr "$bbr_profile" '
    {tag:$tag,name:$name,kind:"hysteria2",port:$port,proto:"u",hopping:$hopping,
     tls_mode:"acme",alpn:["h3"],
-    meta:{password:$password, up_mbps:$up, down_mbps:$down, obfs_type:$obfs_type, obfs_password:$obfs_pw, bbr_profile:$bbr},
+    meta:({password:$password, up_mbps:$up, down_mbps:$down, obfs_type:$obfs_type, obfs_password:$obfs_pw}
+      | if $bbr != "" then .bbr_profile=$bbr else . end),
     inbound:({type:"hysteria2",tag:$tag,listen:"::",listen_port:$port,
       users:[{password:$password}]}
       | if $up > 0 then .up_mbps=$up else . end
