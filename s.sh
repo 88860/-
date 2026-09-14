@@ -2401,8 +2401,8 @@ menu_wireguard(){
            local wg_backup prev_exit
            wg_backup=$(cat "$WG_CONF")
            prev_exit=$(state_get exit)
-           rm -f "$WG_CONF"
            wg_server_nat_remove
+           rm -f "$WG_CONF"
            if [ "$prev_exit" = wireguard ]; then
              state_set exit direct
              stop_watchdog
