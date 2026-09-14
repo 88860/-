@@ -2101,6 +2101,10 @@ peer_delete(){
 peer_stop(){
   clear
   local previous; previous=$(state_get exit)
+  if wg_client_active; then
+    prompt_yes "WireGuard 隧道运行中，是否一并断开" || return
+    json_edit "$WG_CONF" '.enabled=false'
+  fi
   state_set exit direct
   stop_watchdog
   if apply_config; then
