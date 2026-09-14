@@ -695,6 +695,112 @@ build_config(){
        elif ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")) then
          [{ip_cidr:[($host+"/32")],action:"route",outbound:"direct"}]
        elif ($host | test("^[0-9a-fA-F:]+$")) then
+build_config(){
+  local selected domain inbounds outbounds endpoints rules dns_block final use_tun
+  local peer_host node_files tls_extra providers strategy ipv6 probe_target
+  local dns_direct_server dns_remote_server dns_remote_v6_server auto_detect icmp_out
+
+  selected=$(state_get exit); domain=$(state_get domain)
+  probe_target=${WATCHDOG_PROBE:-}
+  final=direct; use_tun=0; endpoints='[]'; peer_host=""; providers='[]'; tls_extra='{}'
+  dns_remote_v6_server=""; strategy=""
+
+  case "$NET_STACK" in
+    both)
+      dns_direct_server="1.1.1.1"
+      dns_remote_server="8.8.8.8"
+      dns_remote_v6_server="2001:4860:4860::8888"
+      ;;
+    v4)
+      strategy="ipv4_only"
+      dns_direct_server="1.1.1.1"
+      dns_remote_server="8.8.8.8"
+      ;;
+    v6)
+      strategy="ipv6_only"
+      dns_direct_server="2606:4700:4700::1111"
+      dns_remote_server="2001:4860:4860::8888"
+      ;;
+    *)
+      strategy="ipv4_only"
+      dns_direct_server="1.1.1.1"
+      dns_remote_server="8.8.8.8"
+      ;;
+  esac
+
+  node_files=("$NODE_DIR"/*.json)
+  inbounds='[]'
+  if [ ${#node_files[@]} -gt 0 ]; then
+    if [ -n "$domain" ]; then
+      providers=$(jq -n --arg t "$CERT_TAG" --argjson a "$(acme_options "$domain")" '[$a+{type:"acme",tag:$t}]')
+      tls_extra=$(jq -n --arg t "$CERT_TAG" '{certificate_provider:$t}')
+    fi
+    inbounds=$(jq -s --arg d "$domain" --argjson x "$tls_extra" '
+      [ .[] |
+        (if .kind=="hysteria2" and ((.inbound.up_mbps//0)>0 or (.inbound.down_mbps//0)>0)
+           then .meta = (.meta | del(.bbr_profile))
+           else . end) |
+        .inbound as $in |
+        ($in | if .type=="hysteria2" and ((.up_mbps//0)>0 or (.down_mbps//0)>0)
+                then del(.bbr_profile)
+                else . end) as $in2 |
+        if .tls_mode=="acme" then
+          $in2 * {tls: ({enabled:true,server_name:$d}
+                       + (if .alpn then {alpn:.alpn} else {} end)
+                       + $x)}
+        else $in2 end ]' "${node_files[@]}") || return 1
+  fi
+
+  outbounds='[{"type":"direct","tag":"direct"}]'
+
+  if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
+    if [ "$(jq -r .role "$WG_CONF")" = client ]; then
+      if [ "$selected" = "direct" ] || [ "$selected" = "wireguard" ]; then
+        endpoints=$(jq '[.endpoint]' "$WG_CONF")
+        peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
+        final="wireguard"; use_tun=1
+      fi
+    else
+      endpoints=$(jq '[.endpoint]' "$WG_CONF")
+    fi
+  fi
+
+  if [ "$selected" != direct ] && [ "$selected" != wireguard ]; then
+    if [ -f "$PEER_DIR/$selected.json" ]; then
+      outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$selected.json" '$base + [$peer[0].outbound]')
+      final=$selected; use_tun=1
+      peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
+    else
+      out_warn "出口节点 $selected 文件不存在，回退直连"
+      final=direct
+    fi
+  fi
+
+  if [ -n "$probe_target" ] && [ "$probe_target" != "direct" ] && [ "$probe_target" != "wireguard" ] && [ -f "$PEER_DIR/$probe_target.json" ]; then
+    outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$probe_target.json" '$base + [$peer[0].outbound]')
+  fi
+
+  if [ "$use_tun" = 1 ]; then
+    inbounds=$(jq -n --argjson list "$inbounds" --arg name "$TUN_IF" '
+      [{type:"tun",tag:"tun-in",interface_name:$name,
+        address:["172.19.0.1/30","fdfe:dcba:9876::1/126"],
+        auto_route:true,strict_route:true,dns_mode:"hijack",stack:"mixed",mtu:9000}] + $list')
+  fi
+
+  if [ "$final" = "wireguard" ]; then
+    icmp_out="wireguard"
+  else
+    icmp_out="direct"
+  fi
+
+  rules=$(jq -n --arg host "$peer_host" --arg dds "$dns_direct_server" --arg icmp "$icmp_out" '
+    [{action:"sniff"},
+     {protocol:"dns",action:"hijack-dns"},
+     {network:"icmp",action:"route",outbound:$icmp}]
+    + (if $host=="" then []
+       elif ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")) then
+         [{ip_cidr:[($host+"/32")],action:"route",outbound:"direct"}]
+       elif ($host | test("^[0-9a-fA-F:]+$")) then
          [{ip_cidr:[($host+"/128")],action:"route",outbound:"direct"}]
        else
          [{domain:[$host],action:"route",outbound:"direct"}]
