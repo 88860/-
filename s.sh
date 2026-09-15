@@ -679,10 +679,141 @@ build_config(){
         {tag:"dns-direct-cf-v4",server:"udp://"+$cf4},
         {tag:"dns-direct-google-v4",server:"udp://"+$gg4}
       ] + (if $has_v6 == 1 then [
-        {tag:"dns-cf-v6",server:"udp://["+$cf6+"]"},
-        {tag:"dns-google-v6",server:"udp://["+$gg6+"]"},
-        {tag:"dns-direct-cf-v6",server:"udp://["+$cf6+"]"},
-        {tag:"dns-direct-google-v6",server:"udp://["+$gg6+"]"}
+build_config(){
+  local selected domain inbounds outbounds endpoints rules dns_block final use_tun
+  local peer_host node_files tls_extra providers probe_target
+  local dns_cf_v4 dns_cf_v6 dns_google_v4 dns_google_v6 auto_detect icmp_out
+  local net_has_v6=0
+
+  selected=$(state_get exit); domain=$(state_get domain)
+  probe_target=${WATCHDOG_PROBE:-}
+  final=direct; use_tun=0; endpoints='[]'; peer_host=""; providers='[]'; tls_extra='{}'
+
+  dns_cf_v4="1.1.1.1"; dns_google_v4="8.8.8.8"
+  dns_cf_v6=""; dns_google_v6=""
+  if [ "$NET_STACK" = "both" ] && [ "$IPV6_OK" = "1" ]; then
+    net_has_v6=1
+    dns_cf_v6="2606:4700:4700::1111"
+    dns_google_v6="2001:4860:4860::8888"
+  elif [ "$NET_STACK" = "v6" ]; then
+    net_has_v6=1
+    dns_cf_v6="2606:4700:4700::1111"
+    dns_google_v6="2001:4860:4860::8888"
+  fi
+
+  node_files=("$NODE_DIR"/*.json)
+  inbounds='[]'
+  if [ ${#node_files[@]} -gt 0 ]; then
+    if [ -n "$domain" ]; then
+      providers=$(jq -n --arg t "$CERT_TAG" --argjson a "$(acme_options "$domain")" '[$a+{type:"acme",tag:$t}]')
+      tls_extra=$(jq -n --arg t "$CERT_TAG" '{certificate_provider:$t}')
+    fi
+    inbounds=$(jq -s --arg d "$domain" --argjson x "$tls_extra" '
+      [ .[] |
+        (if .kind=="hysteria2" and ((.inbound.up_mbps//0)>0 or (.inbound.down_mbps//0)>0)
+           then .meta = (.meta | del(.bbr_profile))
+           else . end) |
+        .inbound as $in |
+        ($in | if .type=="hysteria2" and ((.up_mbps//0)>0 or (.down_mbps//0)>0)
+                then del(.bbr_profile)
+                else . end) as $in2 |
+        if .tls_mode=="acme" then
+          $in2 * {tls: ({enabled:true,server_name:$d}
+                       + (if .alpn then {alpn:.alpn} else {} end)
+                       + $x)}
+        else $in2 end ]' "${node_files[@]}") || return 1
+  fi
+
+  outbounds='[{"type":"direct","tag":"direct","domain_resolver":"dns-direct-cf-v4","network_strategy":"prefer_ipv4","fallback_delay":"300ms"}]'
+
+  if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
+    if [ "$(jq -r .role "$WG_CONF")" = client ]; then
+      if [ "$selected" = "direct" ] || [ "$selected" = "wireguard" ]; then
+        endpoints=$(jq '[.endpoint]' "$WG_CONF")
+        peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
+        final="wireguard"; use_tun=1
+      fi
+    else
+      endpoints=$(jq '[.endpoint]' "$WG_CONF")
+    fi
+  fi
+
+  if [ "$selected" != direct ] && [ "$selected" != wireguard ]; then
+    if [ -f "$PEER_DIR/$selected.json" ]; then
+      outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$selected.json" \
+        '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",network_strategy:"prefer_ipv4",fallback_delay:"300ms"}]')
+      final=$selected; use_tun=1
+      peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
+    else
+      out_warn "出口节点 $selected 文件不存在，回退直连"; final=direct
+    fi
+  fi
+
+  if [ -n "$probe_target" ] && [ "$probe_target" != "direct" ] && [ "$probe_target" != "wireguard" ] && [ -f "$PEER_DIR/$probe_target.json" ]; then
+    outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$probe_target.json" \
+      '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",network_strategy:"prefer_ipv4",fallback_delay:"300ms"}]')
+  fi
+
+  if [ "$use_tun" = 1 ]; then
+    inbounds=$(jq -n --argjson list "$inbounds" --arg name "$TUN_IF" '
+      [{type:"tun",tag:"tun-in",interface_name:$name,
+        address:["172.19.0.1/30","fdfe:dcba:9876::1/126"],
+        auto_route:true,strict_route:true,dns_mode:"hijack",
+        mtu:9000}] + $list')
+  fi
+
+  if [ "$final" = "wireguard" ]; then icmp_out="wireguard"; else icmp_out="direct"; fi
+
+  rules=$(jq -n --arg host "$peer_host" --arg cf4 "$dns_cf_v4" --arg icmp "$icmp_out" '
+    [{network:"icmp",action:"route",outbound:$icmp},
+     {action:"sniff"}]
+    + (if $host=="" then []
+       elif ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")) then
+         [{ip_cidr:[($host+"/32")],action:"route",outbound:"direct"}]
+       elif ($host | test("^[0-9a-fA-F:]+$")) then
+         [{ip_cidr:[($host+"/128")],action:"route",outbound:"direct"}]
+       else
+         [{domain:[$host],action:"route",outbound:"direct"}]
+       end)
+    + [{ip_cidr:[($cf4+"/32")],action:"route",outbound:"direct"}]
+    + [{ip_is_private:true,action:"route",outbound:"direct"}]')
+
+  if [ -n "$probe_target" ]; then
+    inbounds=$(jq -n --argjson list "$inbounds" '[{type:"mixed",tag:"probe-in",listen:"127.0.0.1",listen_port:2081}] + $list')
+    rules=$(jq -n --argjson list "$rules" --arg target "$probe_target" '[{inbound:["probe-in"],action:"route",outbound:$target}] + $list')
+  fi
+
+  if [ "$use_tun" = 1 ]; then auto_detect="true"; else auto_detect="false"; fi
+
+  dns_block=$(jq -n --arg host "$peer_host" \
+                    --arg cf4 "$dns_cf_v4" --arg cf6 "$dns_cf_v6" \
+                    --arg gg4 "$dns_google_v4" --arg gg6 "$dns_google_v6" \
+                    --argjson has_v6 "$net_has_v6" '
+    (if $host != "" and ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") | not) and ($host | test("^[0-9a-fA-F:]+$") | not) then
+      [{action:"evaluate",server:"dns-direct-cf-v4",tag:"node-a"}]
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-direct-cf-v6",tag:"node-aaaa"}] else [] end)
+      + [{action:"evaluate",server:"dns-direct-google-v4",tag:"node-gg-a"}]
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-direct-google-v6",tag:"node-gg-aaaa"}] else [] end)
+      + [
+        {match_response:"node-a",action:"route",server:"dns-direct-cf-v4"},
+        {match_response:"node-gg-a",action:"route",server:"dns-direct-google-v4"}
+      ]
+      + (if $has_v6 == 1 then [
+        {match_response:"node-aaaa",action:"route",server:"dns-direct-cf-v6",race:true},
+        {match_response:"node-gg-aaaa",action:"route",server:"dns-direct-google-v6",race:true}
+      ] else [] end)
+    else [] end) as $node_rules |
+    (
+      [
+        {tag:"dns-cf-v4", type:"udp", server:$cf4, server_port:53},
+        {tag:"dns-google-v4", type:"udp", server:$gg4, server_port:53},
+        {tag:"dns-direct-cf-v4", type:"udp", server:$cf4, server_port:53},
+        {tag:"dns-direct-google-v4", type:"udp", server:$gg4, server_port:53}
+      ] + (if $has_v6 == 1 then [
+        {tag:"dns-cf-v6", type:"udp", server:$cf6, server_port:53},
+        {tag:"dns-google-v6", type:"udp", server:$gg6, server_port:53},
+        {tag:"dns-direct-cf-v6", type:"udp", server:$cf6, server_port:53},
+        {tag:"dns-direct-google-v6", type:"udp", server:$gg6, server_port:53}
       ] else [] end)
     ) as $servers |
     {
@@ -723,6 +854,7 @@ build_config(){
     | if ($endpoints|length)>0 then .endpoints=$endpoints else . end
     | if ($providers|length)>0 then .certificate_providers=$providers else . end'
 }
+
 
 apply_config(){
   local tmp error line guard=0 prev_conf=""
