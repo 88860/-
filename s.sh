@@ -559,14 +559,12 @@ build_config(){
 
   dns_cf_v4="1.1.1.1"; dns_google_v4="8.8.8.8"
   dns_cf_v6=""; dns_google_v6=""
-  if [ "$NET_STACK" = "both" ] && [ "$IPV6_OK" = "1" ]; then
-    net_has_v6=1
-    dns_cf_v6="2606:4700:4700::1111"
-    dns_google_v6="2001:4860:4860::8888"
-  elif [ "$NET_STACK" = "v6" ]; then
-    net_has_v6=1
-    dns_cf_v6="2606:4700:4700::1111"
-    dns_google_v6="2001:4860:4860::8888"
+  if [ "$NET_STACK" = "both" ] || [ "$NET_STACK" = "v6" ]; then
+    if [ "$IPV6_OK" = "1" ]; then
+      net_has_v6=1
+      dns_cf_v6="2606:4700:4700::1111"
+      dns_google_v6="2001:4860:4860::8888"
+    fi
   fi
 
   node_files=("$NODE_DIR"/*.json)
@@ -578,13 +576,8 @@ build_config(){
     fi
     inbounds=$(jq -s --arg d "$domain" --argjson x "$tls_extra" '
       [ .[] |
-        (if .kind=="hysteria2" and ((.inbound.up_mbps//0)>0 or (.inbound.down_mbps//0)>0)
-           then .meta = (.meta | del(.bbr_profile))
-           else . end) |
         .inbound as $in |
-        ($in | if .type=="hysteria2" and ((.up_mbps//0)>0 or (.down_mbps//0)>0)
-                then del(.bbr_profile)
-                else . end) as $in2 |
+        ($in | del(.bbr_profile)) as $in2 |
         if .tls_mode=="acme" then
           $in2 * {tls: ({enabled:true,server_name:$d}
                        + (if .alpn then {alpn:.alpn} else {} end)
@@ -592,7 +585,7 @@ build_config(){
         else $in2 end ]' "${node_files[@]}") || return 1
   fi
 
-  outbounds='[{"type":"direct","tag":"direct","domain_resolver":"dns-direct-cf-v4","network_strategy":"prefer_ipv4","fallback_delay":"300ms"}]'
+  outbounds='[{"type":"direct","tag":"direct"}]'
 
   if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
     if [ "$(jq -r .role "$WG_CONF")" = client ]; then
@@ -609,7 +602,7 @@ build_config(){
   if [ "$selected" != direct ] && [ "$selected" != wireguard ]; then
     if [ -f "$PEER_DIR/$selected.json" ]; then
       outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$selected.json" \
-        '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",network_strategy:"prefer_ipv4",fallback_delay:"300ms"}]')
+        '$base + [$peer[0].outbound]')
       final=$selected; use_tun=1
       peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
     else
@@ -619,13 +612,14 @@ build_config(){
 
   if [ -n "$probe_target" ] && [ "$probe_target" != "direct" ] && [ "$probe_target" != "wireguard" ] && [ -f "$PEER_DIR/$probe_target.json" ]; then
     outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$probe_target.json" \
-      '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",network_strategy:"prefer_ipv4",fallback_delay:"300ms"}]')
+      '$base + [$peer[0].outbound]')
   fi
 
   if [ "$use_tun" = 1 ]; then
     inbounds=$(jq -n --argjson list "$inbounds" --arg name "$TUN_IF" '
       [{type:"tun",tag:"tun-in",interface_name:$name,
-        address:["172.19.0.1/30","fdfe:dcba:9876::1/126"],
+        inet4_address:["172.19.0.1/30"],
+        inet6_address:["fdfe:dcba:9876::1/126"],
         auto_route:true,strict_route:true,dns_mode:"hijack",
         mtu:9000}] + $list')
   fi
@@ -643,7 +637,6 @@ build_config(){
        else
          [{domain:[$host],action:"route",outbound:"direct"}]
        end)
-    + [{ip_cidr:[($cf4+"/32")],action:"route",outbound:"direct"}]
     + [{ip_is_private:true,action:"route",outbound:"direct"}]')
 
   if [ -n "$probe_target" ]; then
@@ -653,57 +646,28 @@ build_config(){
 
   if [ "$use_tun" = 1 ]; then auto_detect="true"; else auto_detect="false"; fi
 
-  dns_block=$(jq -n --arg host "$peer_host" \
+  dns_block=$(jq -n --arg final "$final" \
                     --arg cf4 "$dns_cf_v4" --arg cf6 "$dns_cf_v6" \
                     --arg gg4 "$dns_google_v4" --arg gg6 "$dns_google_v6" \
                     --argjson has_v6 "$net_has_v6" '
-    (if $host != "" and ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") | not) and ($host | test("^[0-9a-fA-F:]+$") | not) then
-      [{action:"evaluate",server:"dns-direct-cf-v4",tag:"node-a"}]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-direct-cf-v6",tag:"node-aaaa"}] else [] end)
-      + [{action:"evaluate",server:"dns-direct-google-v4",tag:"node-gg-a"}]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-direct-google-v6",tag:"node-gg-aaaa"}] else [] end)
-      + [
-        {match_response:"node-a",action:"route",server:"dns-direct-cf-v4"},
-        {match_response:"node-gg-a",action:"route",server:"dns-direct-google-v4"}
-      ]
-      + (if $has_v6 == 1 then [
-        {match_response:"node-aaaa",action:"route",server:"dns-direct-cf-v6",race:true},
-        {match_response:"node-gg-aaaa",action:"route",server:"dns-direct-google-v6",race:true}
-      ] else [] end)
-    else [] end) as $node_rules |
     (
       [
-        {tag:"dns-cf-v4", type:"udp", server:$cf4, server_port:53},
-        {tag:"dns-google-v4", type:"udp", server:$gg4, server_port:53},
-        {tag:"dns-direct-cf-v4", type:"udp", server:$cf4, server_port:53},
-        {tag:"dns-direct-google-v4", type:"udp", server:$gg4, server_port:53}
+        {tag:"dns-direct-v4", address:("udp://"+$cf4), detour:"direct"},
+        {tag:"dns-remote-v4", address:("udp://"+$gg4), detour:$final}
       ] + (if $has_v6 == 1 then [
-        {tag:"dns-cf-v6", type:"udp", server:$cf6, server_port:53},
-        {tag:"dns-google-v6", type:"udp", server:$gg6, server_port:53},
-        {tag:"dns-direct-cf-v6", type:"udp", server:$cf6, server_port:53},
-        {tag:"dns-direct-google-v6", type:"udp", server:$gg6, server_port:53}
+        {tag:"dns-direct-v6", address:("udp://["+$cf6+"]"), detour:"direct"},
+        {tag:"dns-remote-v6", address:("udp://["+$gg6+"]"), detour:$final}
       ] else [] end)
     ) as $servers |
     {
       servers: $servers,
-      rules: ($node_rules + [
-        {action:"evaluate",server:"dns-cf-v4",tag:"remote-a"}
-      ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa"}] else [] end)
-      + [
-        {action:"evaluate",server:"dns-google-v4",tag:"remote-gg-a"}
-      ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa"}] else [] end)
-      + [
-        {match_response:"remote-a",action:"route",server:"dns-cf-v4"},
-        {match_response:"remote-gg-a",action:"route",server:"dns-google-v4"}
-      ]
-      + (if $has_v6 == 1 then [
-        {match_response:"remote-aaaa",action:"route",server:"dns-cf-v6",race:true},
-        {match_response:"remote-gg-aaaa",action:"route",server:"dns-google-v6",race:true}
-      ] else [] end))
-    }')
-
+      rules: [
+        {outbound:["any"], server:"dns-direct-v4"}
+      ],
+      final: "dns-remote-v4",
+      strategy: "prefer_ipv4"
+    }
+  ')
   jq -n --argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
         --argjson endpoints "$endpoints" --argjson rules "$rules" \
         --argjson dns "$dns_block" --argjson providers "$providers" \
@@ -712,10 +676,10 @@ build_config(){
      dns:$dns,
      inbounds:$inbounds,
      outbounds:$outbounds,
-     http_clients:[{tag:"default",detour:"direct",domain_resolver:"dns-direct-cf-v4"}],
+     http_clients:[{tag:"default",detour:"direct"}],
      route:{rules:$rules,final:$final,
             auto_detect_interface:$auto_detect,
-            default_domain_resolver:"dns-direct-cf-v4",
+            default_domain_resolver:"dns-direct-v4",
             default_network_strategy:"prefer_ipv4",
             default_fallback_delay:"300ms",
             default_http_client:"default"}}
