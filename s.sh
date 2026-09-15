@@ -2308,7 +2308,9 @@ wg_setup(){
       peer_public_key:$peer_key,peer_ip:$peer4,peer_host:"",peer_port:0,
       endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,mtu:1408,
         address:[$a4,$a6],private_key:$private,listen_port:$port,
-        peers:[{public_key:$peer_key,allowed_ips:[($peer4+"/32"),($peer6+"/128")]}]}}')
+        peers:[{address:"0.0.0.0",port:$port,public_key:$peer_key,
+        allowed_ips:[($peer4+"/32"),($peer6+"/128")],
+        persistent_keepalive_interval:25}]}}')
   else
     address4="$prefix.2/32"; address6="$ipv6_prefix::2/128"; peer_ip4="$prefix.1"
     peer_host=$(prompt "服务端 IP" "1.1.1.1")
@@ -2324,7 +2326,8 @@ wg_setup(){
       endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,mtu:1408,
         address:[$a4,$a6],private_key:$private,
         peers:[{address:$host,port:$port,public_key:$peer_key,
-                allowed_ips:["0.0.0.0/0","::/0"]}]}}')
+        allowed_ips:["0.0.0.0/0","::/0"],
+        persistent_keepalive_interval:25}]}}')
   fi
   json_save "$WG_CONF" "$body" || { tell_warn "写入失败"; wait_key; return; }
   if [ "$role" = server ]; then wg_server_nat_apply; fi
