@@ -198,7 +198,6 @@ check_dependencies(){
     "ip:iproute2"
     "ping:iputils-ping"
     "ping6:iputils-ping"
-    "wg:wireguard-tools"
     "flock:util-linux"
     "pkill:procps"
     "sysctl:procps"
@@ -2660,7 +2659,7 @@ while :; do
   clear
   tell "${CYAN}================================${PLAIN}"
   tell "${CYAN}             s管理              ${PLAIN}"
-  tell "${CYAN}      [ 仅适配 Systemd 版 ]      ${PLAIN}"
+  tell "${CYAN}      [ 仅适配 Systemd ]        ${PLAIN}"
   tell "${CYAN}================================${PLAIN}"
   tell "  1. 服务端管理"
   tell "  2. 客户端管理"
