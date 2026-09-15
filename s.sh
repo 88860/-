@@ -627,15 +627,14 @@ build_config(){
       [{type:"tun",tag:"tun-in",interface_name:$name,
         address:["172.19.0.1/30","fdfe:dcba:9876::1/126"],
         auto_route:true,strict_route:true,dns_mode:"hijack",
-        stack:"mixed",mtu:9000}] + $list')
+        mtu:9000}] + $list')
   fi
 
   if [ "$final" = "wireguard" ]; then icmp_out="wireguard"; else icmp_out="direct"; fi
 
   rules=$(jq -n --arg host "$peer_host" --arg cf4 "$dns_cf_v4" --arg icmp "$icmp_out" '
     [{network:"icmp",action:"route",outbound:$icmp},
-     {action:"sniff"},
-     {protocol:"dns",action:"hijack-dns"}]
+     {action:"sniff"}]
     + (if $host=="" then []
        elif ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$")) then
          [{ip_cidr:[($host+"/32")],action:"route",outbound:"direct"}]
@@ -674,15 +673,15 @@ build_config(){
     else [] end) as $node_rules |
     (
       [
-        {tag:"dns-cf-v4",server:"udp://"+$cf4},
-        {tag:"dns-google-v4",server:"udp://"+$gg4},
-        {tag:"dns-direct-cf-v4",server:"udp://"+$cf4},
-        {tag:"dns-direct-google-v4",server:"udp://"+$gg4}
+        {tag:"dns-cf-v4", type:"udp", server:$cf4, server_port:53},
+        {tag:"dns-google-v4", type:"udp", server:$gg4, server_port:53},
+        {tag:"dns-direct-cf-v4", type:"udp", server:$cf4, server_port:53},
+        {tag:"dns-direct-google-v4", type:"udp", server:$gg4, server_port:53}
       ] + (if $has_v6 == 1 then [
-        {tag:"dns-cf-v6",server:"udp://["+$cf6+"]"},
-        {tag:"dns-google-v6",server:"udp://["+$gg6+"]"},
-        {tag:"dns-direct-cf-v6",server:"udp://["+$cf6+"]"},
-        {tag:"dns-direct-google-v6",server:"udp://["+$gg6+"]"}
+        {tag:"dns-cf-v6", type:"udp", server:$cf6, server_port:53},
+        {tag:"dns-google-v6", type:"udp", server:$gg6, server_port:53},
+        {tag:"dns-direct-cf-v6", type:"udp", server:$cf6, server_port:53},
+        {tag:"dns-direct-google-v6", type:"udp", server:$gg6, server_port:53}
       ] else [] end)
     ) as $servers |
     {
