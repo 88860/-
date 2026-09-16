@@ -482,9 +482,10 @@ management_ssh_destinations(){
   for file in "$PEER_DIR"/*.json; do
     [ -f "$file" ] || continue
     host=$(jq -r '.outbound.server//""' "$file" 2>/dev/null)
-    port=$(jq -r '.management_port // 22' "$file" 2>/dev/null)
-    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || port=22
-    [ "$port" -le 65535 ] || port=22
+    port=$(jq -r '.management_port // 0' "$file" 2>/dev/null)
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || port=0
+    [ "$port" -gt 0 ] || continue
+    [ "$port" -le 65535 ] || continue
     [ -n "$host" ] || continue
     if printf '%s' "$host" | grep -Eq '^[0-9]+(\.[0-9]+){3}$|^[0-9A-Fa-f:]+$'; then
       printf '%s|%s\n' "$host" "$port"
@@ -496,10 +497,9 @@ management_ssh_destinations(){
   done
   if [ -f "$WG_CONF" ]; then
     host=$(jq -r '.peer_host // ""' "$WG_CONF" 2>/dev/null)
-    port=$(jq -r '.management_port // 22' "$WG_CONF" 2>/dev/null)
-    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || port=22
-    [ "$port" -le 65535 ] || port=22
-    if [ -n "$host" ]; then
+    port=$(jq -r '.management_port // 0' "$WG_CONF" 2>/dev/null)
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || port=0
+    if [ "$port" -gt 0 ] && [ "$port" -le 65535 ] && [ -n "$host" ]; then
       if printf '%s' "$host" | grep -Eq '^[0-9]+(\.[0-9]+){3}$|^[0-9A-Fa-f:]+$'; then
         printf '%s|%s\n' "$host" "$port"
       else
