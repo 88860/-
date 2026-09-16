@@ -920,7 +920,6 @@ build_config(){
       bootstrap_server="2606:4700:4700::1111"
       listen_addr="::"
       tun_addresses='["fdfe:dcba:9876::1/126"]'
-      tun_dns_addresses='["fdfe:dcba:9876::2"]'
       ;;
     both)
       if [ "${IPV6_OK:-0}" = "1" ]; then
@@ -928,7 +927,6 @@ build_config(){
         bootstrap_dns="dns-bootstrap-v4"
         bootstrap_server="1.1.1.1"
         tun_addresses='["172.19.0.1/30","fdfe:dcba:9876::1/126"]'
-        tun_dns_addresses='["172.19.0.2","fdfe:dcba:9876::2"]'
 
         if [ "$bindv6only" = "1" ]; then
           listen_addr="0.0.0.0"
@@ -941,7 +939,6 @@ build_config(){
         bootstrap_server="1.1.1.1"
         listen_addr="0.0.0.0"
         tun_addresses='["172.19.0.1/30"]'
-        tun_dns_addresses='["172.19.0.2"]'
       fi
       ;;
     *)
@@ -950,7 +947,6 @@ build_config(){
       bootstrap_server="1.1.1.1"
       listen_addr="0.0.0.0"
       tun_addresses='["172.19.0.1/30"]'
-      tun_dns_addresses='["172.19.0.2"]'
       ;;
   esac
 
@@ -1026,22 +1022,12 @@ build_config(){
     }
   ]'
 
-  if [ -f "$WG_CONF" ] &&
-     [ "$(jq -r '.enabled//false' "$WG_CONF" 2>/dev/null)" = "true" ]; then
-
+  if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF" 2>/dev/null)" = "true" ]; then
     wg_role=$(jq -r '.role//""' "$WG_CONF" 2>/dev/null)
-    wg_endpoint=$(jq -r 'if .endpoint then "yes" else "no" end' "$WG_CONF" 2>/dev/null)
 
     if [ "$wg_role" = "client" ]; then
       if [ "$selected" = "direct" ] || [ "$selected" = "wireguard" ]; then
-        if [ "$wg_endpoint" = "yes" ]; then
-
-          endpoints=$(
-            jq '
-              if .endpoint then [.endpoint] else [] end
-            ' "$WG_CONF"
-          ) || return 1
-
+        if [ "$(jq -r 'has("outbound")' "$WG_CONF" 2>/dev/null)" = "true" ]; then
           peer_host=$(jq -r '.peer_host // ""' "$WG_CONF") || return 1
           if [ -n "$peer_host" ]; then
             wg_exclude_addresses=$(wg_endpoint_route_excludes "$peer_host" | sort -u | jq -Rsc 'split("\n")|map(select(length>0))') || {
@@ -1056,23 +1042,12 @@ build_config(){
           final="wireguard"
           use_tun=1
 
-          if [ -n "$peer_host" ] &&
-             ! printf '%s' "$peer_host" |
-             grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|^[0-9A-Fa-f:]+$'; then
-
-            endpoints=$(
-              jq \
-                --arg resolver "$bootstrap_dns" \
-                '
-                map(
-                  if .type=="wireguard"
-                  then .domain_resolver=$resolver
-                  else .
-                  end
-                )
-                ' <<<"$endpoints"
-            ) || return 1
+          local wg_ob
+          wg_ob=$(jq -c '.outbound' "$WG_CONF")
+          if [ -n "$peer_host" ] && ! printf '%s' "$peer_host" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|^[0-9A-Fa-f:]+$'; then
+             wg_ob=$(jq -c --arg resolver "$bootstrap_dns" --arg strategy "$dns_strategy" '.domain_resolver={server:$resolver,strategy:$strategy}' <<<"$wg_ob")
           fi
+          outbounds=$(jq --argjson ob "$wg_ob" '. + [$ob]' <<<"$outbounds") || return 1
 
         else
           final="direct"
@@ -1080,8 +1055,8 @@ build_config(){
           peer_host=""
         fi
       fi
-
     elif [ "$wg_role" = "server" ]; then
+      wg_endpoint=$(jq -r 'if .endpoint then "yes" else "no" end' "$WG_CONF" 2>/dev/null)
       if [ "$wg_endpoint" = "yes" ]; then
         endpoints=$(
           jq '
@@ -1096,49 +1071,30 @@ build_config(){
      [ "$selected" != "wireguard" ]; then
 
     if [ -f "$PEER_DIR/$selected.json" ]; then
-
       selected_outbound=$(
         jq -c \
           --arg tag "$selected" \
           --arg resolver "$bootstrap_dns" \
+          --arg strategy "$dns_strategy" \
           '
           .outbound
           | .tag=$tag
-          | .domain_resolver=$resolver
+          | .domain_resolver={server:$resolver,strategy:$strategy}
           ' "$PEER_DIR/$selected.json"
       ) || return 1
 
       if [ -z "$selected_outbound" ] ||
          [ "$selected_outbound" = "null" ]; then
-
         tell_warn "出口节点 $selected 配置无效，回退直连"
-        final="direct"
-        use_tun=0
-        peer_host=""
-
+        final="direct"; use_tun=0; peer_host=""
       else
-
-        outbounds=$(
-          jq \
-            --argjson outbound "$selected_outbound" \
-            '. + [$outbound]'
-            <<<"$outbounds"
-        ) || return 1
-
-        final="$selected"
-        use_tun=1
-
-        peer_host=$(
-          jq -r '.outbound.server//""' "$PEER_DIR/$selected.json"
-        ) || return 1
+        outbounds=$(jq --argjson outbound "$selected_outbound" '. + [$outbound]' <<<"$outbounds") || return 1
+        final="$selected"; use_tun=1
+        peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json") || return 1
       fi
-
     else
-
       tell_warn "出口节点 $selected 文件不存在，回退直连"
-      final="direct"
-      use_tun=0
-      peer_host=""
+      final="direct"; use_tun=0; peer_host=""
     fi
   fi
 
@@ -1147,32 +1103,22 @@ build_config(){
      [ "$probe_target" != "wireguard" ]; then
 
     if [ "$probe_target" = "$final" ]; then
-
       probe_enabled=1
-
     elif [ -f "$PEER_DIR/$probe_target.json" ]; then
-
       probe_outbound=$(
         jq -c \
           --arg tag "$probe_target" \
           --arg resolver "$bootstrap_dns" \
+          --arg strategy "$dns_strategy" \
           '
           .outbound
           | .tag=$tag
-          | .domain_resolver=$resolver
+          | .domain_resolver={server:$resolver,strategy:$strategy}
           ' "$PEER_DIR/$probe_target.json"
       ) || return 1
 
-      if [ -n "$probe_outbound" ] &&
-         [ "$probe_outbound" != "null" ]; then
-
-        outbounds=$(
-          jq \
-            --argjson outbound "$probe_outbound" \
-            '. + [$outbound]'
-            <<<"$outbounds"
-        ) || return 1
-
+      if [ -n "$probe_outbound" ] && [ "$probe_outbound" != "null" ]; then
+        outbounds=$(jq --argjson outbound "$probe_outbound" '. + [$outbound]' <<<"$outbounds") || return 1
         probe_enabled=1
       fi
     fi
@@ -1195,12 +1141,10 @@ build_config(){
   ) || return 1
 
   if [ "$use_tun" = "1" ]; then
-
     inbounds=$(
       jq \
         --arg name "$TUN_IF" \
         --argjson address "$tun_addresses" \
-        --argjson dns_address "$tun_dns_addresses" \
         --argjson exclude "$wg_exclude_addresses" \
         --argjson list "$inbounds" \
         '
@@ -1212,8 +1156,6 @@ build_config(){
             address:$address,
             auto_route:true,
             strict_route:true,
-            dns_mode:"hijack",
-            dns_address:$dns_address,
             route_exclude_address:$exclude
           }
         ] + $list
@@ -1241,7 +1183,6 @@ build_config(){
   ) || return 1
 
   if [ "$probe_enabled" = "1" ]; then
-
     inbounds=$(
       jq \
         --argjson list "$inbounds" \
@@ -1292,7 +1233,8 @@ build_config(){
             path:"/dns-query",
             tls:{
               server_name:"cloudflare-dns.com"
-            }
+            },
+            detour:"direct"
           },
           {
             type:"https",
@@ -1340,7 +1282,8 @@ build_config(){
     --argjson dns "$dns_block" \
     --argjson providers "$providers" \
     --arg final "$final" \
-    --arg bootstrap "$bootstrap_dns" \
+    --arg resolver "$bootstrap_dns" \
+    --arg strategy "$dns_strategy" \
     --argjson use_tun "$use_tun" \
     '
     {
@@ -1354,7 +1297,10 @@ build_config(){
       route:{
         rules:$rules,
         final:$final,
-        default_domain_resolver:$bootstrap
+        default_domain_resolver:{
+          server:$resolver,
+          strategy:$strategy
+        }
       }
     }
     |
@@ -1380,6 +1326,7 @@ build_config(){
     end
     '
 }
+
 
 restore_config_runtime(){
   local prev_conf=$1 prev_active=${2:-0} prev_exists=${3:-0}
