@@ -1049,6 +1049,7 @@ menu_modify_protocol(){
           if [ -z "$value" ]; then json_edit "$PICKED" 'del(.meta.client_metadata)' || { tell_warn 失败; wait_key; continue; }
           else json_edit "$PICKED" '.meta.client_metadata=$v' --arg v "$value" || { tell_warn 失败; wait_key; continue; }; fi
         elif [ "$kind" = hysteria2 ]; then
+  tell "        elif [ "$kind" = hysteria2 ]; then
   tell "  1. BBR conservative"; tell "  2. BBR standard"; tell "  3. BBR aggressive"; tell "  4. Brutal"
   while :; do
     case $(prompt "请选择" 2) in
