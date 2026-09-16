@@ -852,9 +852,6 @@ create_hysteria2(){
       | if $ot=="gecko" and $mp!="" then .min_packet_size=($mp|tonumber) else . end
       | if $ot=="gecko" and $pk!="" then .max_packet_size=($pk|tonumber) else . end),
     inbound:({type:"hysteria2",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pw}]}
-      | if $up>0 then .up_mbps=$up else . end
-      | if $down>0 then .down_mbps=$down else . end
-      | if $bbr!="" then .bbr_profile=$bbr else . end
       | if $ot!="" then .obfs={type:$ot,password:$op} else . end
       | if $ot=="gecko" and $mp!="" then .obfs.min_packet_size=($mp|tonumber) else . end
       | if $ot=="gecko" and $pk!="" then .obfs.max_packet_size=($pk|tonumber) else . end)}')
