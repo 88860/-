@@ -1042,10 +1042,10 @@ menu_modify_protocol(){
     esac
   done
   if [ "$bbr" != "" ]; then
-    json_edit "$PICKED" '.meta.up_mbps=0|.meta.down_mbps=0|.meta.bbr_profile=$b|del(.inbound.up_mbps,.inbound.down_mbps,.inbound.bbr_profile)' --arg b "$bbr" || { tell_warn 失败; wait_key; continue; }
-  else
-    json_edit "$PICKED" '.meta.up_mbps=$u|.meta.down_mbps=$d|.meta.bbr_profile=""|del(.inbound.up_mbps,.inbound.down_mbps,.inbound.bbr_profile)' --argjson u "$up" --argjson d "$down" || { tell_warn 失败; wait_key; continue; }
-  fi
+  json_edit "$PICKED" '.meta.up_mbps=0|.meta.down_mbps=0|.meta.bbr_profile=$b|del(.inbound.up_mbps,.inbound.down_mbps,.inbound.bbr_profile)' --arg b "$bbr" || { tell_warn 失败; wait_key; continue; }
+else
+  json_edit "$PICKED" '.meta.up_mbps=$u|.meta.down_mbps=$d|.meta.bbr_profile=""|del(.inbound.up_mbps,.inbound.down_mbps,.inbound.bbr_profile)' --argjson u "$up" --argjson d "$down" || { tell_warn 失败; wait_key; continue; }
+fi
 else tell_warn 无效; sleep 1; continue; fi ;;
       5)
         if [ "$kind" = vless-reality ]; then
