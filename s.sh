@@ -2805,11 +2805,16 @@ wg_setup(){
     local wg_addr_json wg_peer_allowed_json
     case "$NET_STACK" in
       v4)
-        address4="$prefix.1/24"; address6=""; peer_ip4="$prefix.2"; peer_ip6=""; wg_addr_json='["'"$address4"'"]'; wg_peer_allowed_json='["'"$peer_ip4/32"'"]' ;;
+        address4="$prefix.1/24"; peer_ip4="$prefix.2"
+        wg_addr_json='["'"$address4"'"]'; wg_peer_allowed_json='["'"$peer_ip4/32"'"]' ;;
       v6)
-        address4=""; address6="$ipv6_prefix::1/64"; peer_ip4=""; peer_ip6="$ipv6_prefix::2"; wg_addr_json='["'"$address6"'"]'; wg_peer_allowed_json='["'"$peer_ip6/128"'"]' ;;
+        address6="$ipv6_prefix::1/64"; peer_ip6="$ipv6_prefix::2"
+        wg_addr_json='["'"$address6"'"]'; wg_peer_allowed_json='["'"$peer_ip6/128"'"]' ;;
       both)
-        address4="$prefix.1/24"; address6="$ipv6_prefix::1/64"; peer_ip4="$prefix.2"; peer_ip6="$ipv6_prefix::2"; wg_addr_json='["'"$address4"'","'"$address6"'"]'; wg_peer_allowed_json='["'"$peer_ip4/32"'","'"$peer_ip6/128"'"]' ;;
+        address4="$prefix.1/24"; address6="$ipv6_prefix::1/64"
+        peer_ip4="$prefix.2"; peer_ip6="$ipv6_prefix::2"
+        wg_addr_json='["'"$address4"'","'"$address6"'"]'
+        wg_peer_allowed_json='["'"$peer_ip4/32"'","'"$peer_ip6/128"'"]' ;;
       *) tell_warn "当前网络无可用 IPv4/IPv6 出口"; wait_key; return ;;
     esac
     while :; do listen_port=$(prompt_port "u" "") || return; break; done
@@ -2825,39 +2830,45 @@ wg_setup(){
     peer_host=$(prompt "服务端地址（IP或域名）" "1.1.1.1")
     peer_port=$(prompt "服务端监听端口" "$(random_port)")
     peer_key=$(prompt "服务端公钥")
-    management_port=$(prompt "服务端 SSH 端口" "22")
+    management_port=22
     [[ $peer_port =~ ^[0-9]+$ ]] && [ "$peer_port" -ge 1 ] && [ "$peer_port" -le 65535 ] || { tell_warn "端口必须为 1-65535"; wait_key; return; }
-    [[ $management_port =~ ^[0-9]+$ ]] && [ "$management_port" -ge 1 ] && [ "$management_port" -le 65535 ] || { tell_warn "SSH 端口必须为 1-65535"; wait_key; return; }
-    local wg_addr_json wg_allowed_json
+    local wg_addr_json
     case "$NET_STACK" in
       v4)
-        address4="$prefix.2/32"; address6=""; peer_ip4="$prefix.1"; wg_addr_json='["'"$address4"'"]'; wg_allowed_json='["0.0.0.0/0"]' ;;
+        address4="$prefix.2/32"; peer_ip4="$prefix.1"; wg_addr_json='["'"$address4"'"]' ;;
       v6)
-        address4=""; address6="$ipv6_prefix::2/128"; peer_ip4="$ipv6_prefix::1"; wg_addr_json='["'"$address6"'"]'; wg_allowed_json='["::/0"]' ;;
+        address6="$ipv6_prefix::2/128"; peer_ip4="$ipv6_prefix::1"; wg_addr_json='["'"$address6"'"]' ;;
       both)
-        address4="$prefix.2/32"; address6="$ipv6_prefix::2/128"; peer_ip4="$prefix.1"; wg_addr_json='["'"$address4"'","'"$address6"'"]'; wg_allowed_json='["0.0.0.0/0","::/0"]' ;;
+        address4="$prefix.2/32"; address6="$ipv6_prefix::2/128"; peer_ip4="$prefix.1"
+        wg_addr_json='["'"$address4"'","'"$address6"'"]' ;;
       *) tell_warn "当前网络无可用 IPv4/IPv6 出口"; wait_key; return ;;
     esac
     body=$(jq -n --arg private "$private" --arg public "$public" --arg host "$peer_host" --argjson port "$peer_port" --arg peer_key "$peer_key" \
-          --argjson management_port "$management_port" --arg peer4 "$peer_ip4" --arg iface "$WG_IF" \
-          --argjson addresses "$wg_addr_json" --argjson allowed "$wg_allowed_json" \
+          --argjson management_port "$management_port" --arg peer4 "$peer_ip4" \
+          --argjson addresses "$wg_addr_json" \
           '{role:"client",enabled:false,private_key:$private,public_key:$public,address:$addresses,listen_port:0,management_port:$management_port,
             peer_public_key:$peer_key,peer_ip:$peer4,peer_host:$host,peer_port:$port,
-            endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,mtu:1408,address:$addresses,private_key:$private,
-              peers:[{address:$host,port:$port,public_key:$peer_key,allowed_ips:$allowed}]}}')
+            outbound:{type:"wireguard",tag:"wireguard",server:$host,server_port:$port,local_address:$addresses,private_key:$private,peer_public_key:$peer_key,mtu:1408}}')
   fi
   json_save "$WG_CONF" "$body" || { tell_warn "写入失败"; wait_key; return; }
   render_wg_info "$WG_CONF"; wait_key
 }
 
 wg_fill_peer_key(){
-  local key old_json
+  local key old_json role
   clear; tell "${CYAN}========== 回填对端公钥 ==========${PLAIN}"
   [ -f "$WG_CONF" ] || { tell_warn "请先初始化"; wait_key; return; }
+  role=$(jq -r .role "$WG_CONF")
   key=$(prompt "对端公钥" "$(jq -r .peer_public_key "$WG_CONF")")
   [ -n "$key" ] || return
   old_json=$(cat "$WG_CONF") || { tell_warn "无法读取当前配置"; wait_key; return; }
-  json_edit "$WG_CONF" '.peer_public_key=$k|.endpoint.peers[0].public_key=$k' --arg k "$key" || { tell_warn "覆盖失败"; wait_key; return; }
+  
+  if [ "$role" = "server" ]; then
+    json_edit "$WG_CONF" '.peer_public_key=$k|.endpoint.peers[0].public_key=$k' --arg k "$key" || { tell_warn "覆盖失败"; wait_key; return; }
+  else
+    json_edit "$WG_CONF" '.peer_public_key=$k|.outbound.peer_public_key=$k' --arg k "$key" || { tell_warn "覆盖失败"; wait_key; return; }
+  fi
+
   if [ "$(jq -r .enabled "$WG_CONF")" = true ]; then
     if apply_config; then
       if [ "$(jq -r .role "$WG_CONF")" = client ] && [ "$(wg_tunnel_state "$(jq -r .peer_ip "$WG_CONF")" "$(jq -r .peer_host // "" "$WG_CONF")")" != up ]; then
