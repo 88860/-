@@ -1444,13 +1444,13 @@ get_ip_info(){
 
   local raw_ip
   if [ "$mode" = 6 ]; then
-    raw_ip=$(env http_proxy="$proxy_env" wget -qO- -T 5 https://ipv6.icanhazip.com 2>/dev/null | tr -d '\n ')
-  else
-    raw_ip=$(env http_proxy="$proxy_env" wget -qO- -T 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n ')
-  fi
+  raw_ip=$(env http_proxy="$proxy_env" https_proxy="$proxy_env" wget -qO- -T 5 https://ipv6.icanhazip.com 2>/dev/null | tr -d '\n ')
+else
+  raw_ip=$(env http_proxy="$proxy_env" https_proxy="$proxy_env" wget -qO- -T 5 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\n ')
+fi
 
-  if [ -n "$raw_ip" ]; then
-    res=$(env http_proxy="$proxy_env" wget -qO- -T 5 "https://ipwho.is/${raw_ip}" 2>/dev/null)
+if [ -n "$raw_ip" ]; then
+  res=$(env http_proxy="$proxy_env" https_proxy="$proxy_env" wget -qO- -T 5 "https://ipwho.is/${raw_ip}" 2>/dev/null)
     ip=$(echo "$res" | jq -r '.ip // empty' 2>/dev/null)
     if [ -n "$ip" ]; then
       country=$(echo "$res" | jq -r '.country // empty' 2>/dev/null)
