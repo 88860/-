@@ -759,7 +759,7 @@ select_node(){
 
 # ============ 创建协议 ============
 create_vless_reality(){
-  local name port uuid target keypair private public sid tag body dsid
+  local name port uuid target keypair private public sid tag body dsid res
   clear; tell "${CYAN}========== 创建协议 ==========${PLAIN}"
   name=$(prompt "节点名称" "VLESS-Reality")
   port=$(prompt_port t "")
@@ -767,7 +767,6 @@ create_vless_reality(){
   while :; do
     target=$(prompt "握手目标域名" "www.microsoft.com")
     command -v openssl >/dev/null || { tell_warn "openssl 缺失"; wait_key; return; }
-    local res
     res=$(echo | timeout 10 openssl s_client -connect "$target:443" -servername "$target" -alpn h2 -tls1_3 2>/dev/null)
     grep -q "TLSv1.3" <<<"$res" && grep -q "ALPN protocol: h2" <<<"$res" && { tell_ok "验证通过"; break; }
     tell_warn "握手验证失败"; prompt_yes "强制使用" && break
@@ -792,7 +791,6 @@ create_vless_reality(){
       tls:{enabled:true,server_name:$target,reality:{enabled:true,handshake:{server:$target,server_port:443},private_key:$private,short_id:[$sid]}}}}')
   save_node "$NODE_DIR/$tag.json" "$body"
 }
-
 create_vless_tls(){
   local name port uuid tag body
   clear; tell "${CYAN}========== 创建协议 ==========${PLAIN}"
