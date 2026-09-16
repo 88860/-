@@ -2512,7 +2512,7 @@ uri_to_outbound(){
 }
 
 peer_add(){
-  local name uri tag outbound probe management_port
+  local name uri tag outbound probe
   clear; tell "${CYAN}========== 添加节点 ==========${PLAIN}"
   name=$(prompt "识别名称" "RemoteNode"); [ -n "$name" ] || return
   uri=$(prompt "节点链接"); [ -n "$uri" ] || return
@@ -2527,9 +2527,7 @@ peer_add(){
   probe=$(mktemp); TMP_FILES="$TMP_FILES $probe"
   jq -n --argjson ob "$outbound" '{log:{level:"error"},outbounds:[$ob,{type:"direct",tag:"direct"}],route:{final:"direct"}}' >"$probe"
   if "$CORE" check -c "$probe" >/dev/null 2>&1; then
-    management_port=$(prompt "对端 SSH 端口" "22")
-    [[ "$management_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$management_port" -le 65535 ] || { tell_warn "SSH 端口无效"; rm -f "$probe"; wait_key; return; }
-    if json_save "$PEER_DIR/$tag.json" "$(jq -n --arg tag "$tag" --arg name "$name" --arg uri "$uri" --argjson ob "$outbound" --argjson mp "$management_port" '{tag:$tag,name:$name,uri:$uri,management_port:$mp,outbound:$ob}')"; then
+    if json_save "$PEER_DIR/$tag.json" "$(jq -n --arg tag "$tag" --arg name "$name" --arg uri "$uri" --argjson ob "$outbound" '{tag:$tag,name:$name,uri:$uri,outbound:$ob}')"; then
       tell_ok "挂载完成: $name"
     else
       tell_warn "节点保存失败，未完成挂载"
