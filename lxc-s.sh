@@ -1609,35 +1609,35 @@ wg_setup(){
   if [ "$role" = server ]; then
     address4="$prefix.1/24"; address6="fd00:7::1/64"
     peer_ip4="$prefix.2"; peer_ip6="fd00:7::2"
-    while :; do
-      listen_port=$(prompt_port "u" "") || return
-      break
-    done
+    listen_port=$(prompt_port "u" "") || return
     peer_key=$(prompt "客户端公钥 (留空稍后回填)")
 
-    body=$(jq -n --arg private "$private" --arg public "$public" --arg a4 "$address4" --arg a6 "$address6" \
+    body=$(jq -n --arg private "$private" --arg public "$public" \
+          --arg a4 "$address4" --arg a6 "$address6" \
           --argjson port "$listen_port" --arg peer_key "$peer_key" \
           --arg peer4 "$peer_ip4" --arg peer6 "$peer_ip6" --arg iface "$WG_IF" '
      {role:"server",enabled:false,private_key:$private,public_key:$public,
       address:[$a4,$a6],listen_port:$port,
-      peer_public_key:$peer_key,peer_ip:$peer4,peer_host:"",peer_port:0,
+      peer_ip:$peer4,peer_host:"",peer_port:0,
       endpoint:{type:"wireguard",tag:"wireguard",system:false,name:$iface,mtu:1408,
         address:[$a4,$a6],private_key:$private,listen_port:$port,
-        peers:[{public_key:$peer_key,allowed_ips:[($peer4+"/32"),($peer6+"/128")]}]}}')
+        peers:[{public_key:$peer_key,
+                allowed_ips:[($peer4+"/32"),($peer6+"/128")]}]}}')
   else
     address4="$prefix.2/32"; address6="fd00:7::2/128"; peer_ip4="$prefix.1"
-    peer_host=$(prompt "服务端 IP" "1.1.1.1")
+    peer_host=$(prompt "服务端 IP (建议填 IP 而非域名)" "1.1.1.1")
     peer_port=$(prompt "服务端监听端口" "$(random_port)")
     peer_key=$(prompt "服务端公钥")
 
     if ! echo "$peer_port" | grep -Eq '^[0-9]+$'; then tell_warn "端口无效"; wait_key; return; fi
 
-    body=$(jq -n --arg private "$private" --arg public "$public" --arg a4 "$address4" --arg a6 "$address6" \
+    body=$(jq -n --arg private "$private" --arg public "$public" \
+          --arg a4 "$address4" --arg a6 "$address6" \
           --arg host "$peer_host" --argjson port "$peer_port" --arg peer_key "$peer_key" \
           --arg peer4 "$peer_ip4" --arg iface "$WG_IF" '
      {role:"client",enabled:false,private_key:$private,public_key:$public,
       address:[$a4,$a6],listen_port:0,
-      peer_public_key:$peer_key,peer_ip:$peer4,peer_host:$host,peer_port:$port,
+      peer_ip:$peer4,peer_host:$host,peer_port:$port,
       endpoint:{type:"wireguard",tag:"wireguard",system:false,name:$iface,mtu:1408,
         address:[$a4,$a6],private_key:$private,
         peers:[{address:$host,port:$port,public_key:$peer_key,
