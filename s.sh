@@ -808,22 +808,39 @@ create_hysteria2(){
   clear; tell "${CYAN}========== 创建协议 ==========${PLAIN}"
   name=$(prompt "节点名称" "Hysteria2"); setup_certificate || return
   port=$(prompt_port u ""); pw=$(prompt "连接密码 (留空自动生成)" "$(random_password)")
+
+  # ===== 拥塞控制方案 =====
   bbr=""; up=0; down=0
-  tell "  1. BBR conservative"; tell "  2. BBR standard"; tell "  3. BBR aggressive"; tell "  4. Brutal"
+  tell "  1. BBR"
+  tell "  2. Brutal"
   while :; do
-    cc=$(prompt "请选择拥塞控制" 2)
+    cc=$(prompt "请选择拥塞控制方案" 1)
     case "$cc" in
-      1) bbr=conservative; break ;; 2) bbr=standard; break ;; 3) bbr=aggressive; break ;;
-      4) bbr=""
-         while :; do
-           up=$(prompt "上行 Mbps" "0"); [[ $up =~ ^[0-9]+$ ]] || { tell_warn "无效"; continue; }
-           down=$(prompt "下行 Mbps" "0"); [[ $down =~ ^[0-9]+$ ]] || { tell_warn "无效"; continue; }
-           { [ "$up" -gt 0 ] || [ "$down" -gt 0 ]; } && break
-           tell_warn "至少设置一个方向"
-         done; break ;;
+      1)
+        tell "  1. conservative"; tell "  2. standard"; tell "  3. aggressive"
+        while :; do
+          case $(prompt "请选择 BBR profile" 2) in
+            1) bbr=conservative; break ;;
+            2) bbr=standard; break ;;
+            3) bbr=aggressive; break ;;
+            *) tell_warn "输入无效"; sleep 1 ;;
+          esac
+        done
+        break ;;
+      2)
+        bbr=""
+        while :; do
+          up=$(prompt "上行 Mbps" "0"); [[ $up =~ ^[0-9]+$ ]] || { tell_warn "无效"; continue; }
+          down=$(prompt "下行 Mbps" "0"); [[ $down =~ ^[0-9]+$ ]] || { tell_warn "无效"; continue; }
+          { [ "$up" -gt 0 ] || [ "$down" -gt 0 ]; } && break
+          tell_warn "至少设置一个方向"
+        done
+        break ;;
       *) tell_warn "输入无效"; sleep 1 ;;
     esac
   done
+
+  # ===== 混淆 =====
   ot=""; op=""; mp=""; pk=""
   if prompt_yes "是否配置协议混淆"; then
     tell "  1. Salamander"; tell "  2. Gecko"
@@ -834,6 +851,8 @@ create_hysteria2(){
       [[ $mp =~ ^[0-9]+$ ]] || mp=512; [[ $pk =~ ^[0-9]+$ ]] || pk=1200
     fi
   fi
+
+  # ===== 端口跳跃 =====
   hop=""
   if prompt_yes "是否配置端口跳跃"; then
     while :; do
@@ -843,6 +862,8 @@ create_hysteria2(){
       tell_warn "范围不合法"
     done
   fi
+
+  # ===== 构建节点文件 =====
   tag=$(unique_tag "$name" in- "$NODE_DIR")
   body=$(jq -n --arg tag "$tag" --arg name "$name" --argjson port "$port" --arg pw "$pw" --arg hop "$hop" \
         --argjson up "$up" --argjson down "$down" --arg ot "$ot" --arg op "$op" --arg bbr "$bbr" --arg mp "$mp" --arg pk "$pk" '
@@ -854,7 +875,10 @@ create_hysteria2(){
     inbound:({type:"hysteria2",tag:$tag,listen:"::",listen_port:$port,users:[{password:$pw}]}
       | if $ot!="" then .obfs={type:$ot,password:$op} else . end
       | if $ot=="gecko" and $mp!="" then .obfs.min_packet_size=($mp|tonumber) else . end
-      | if $ot=="gecko" and $pk!="" then .obfs.max_packet_size=($pk|tonumber) else . end)}')
+      | if $ot=="gecko" and $pk!="" then .obfs.max_packet_size=($pk|tonumber) else . end
+      | if $bbr!="" then .bbr_profile=$bbr else . end
+      | if $up>0 then .up_mbps=$up else . end
+      | if $down>0 then .down_mbps=$down else . end)}')
   save_node "$NODE_DIR/$tag.json" "$body"
 }
 
