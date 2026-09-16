@@ -1025,15 +1025,28 @@ menu_modify_protocol(){
           if [ -z "$value" ]; then json_edit "$PICKED" 'del(.meta.client_metadata)' || { tell_warn 失败; wait_key; continue; }
           else json_edit "$PICKED" '.meta.client_metadata=$v' --arg v "$value" || { tell_warn 失败; wait_key; continue; }; fi
         elif [ "$kind" = hysteria2 ]; then
-          cur_hop=$(jq -r '.hopping//""' "$PICKED")
-          value=$(prompt "跳跃范围 (当前: ${cur_hop:-未开启}, 0 关闭)")
-          [ -z "$value" ] && { tell_ok "保持不变"; wait_key; continue; }
-          if [ "$value" = "0" ]; then value=""
-          else
-            [[ $value =~ ^[0-9]+-[0-9]+$ ]] || { tell_warn "格式错误"; wait_key; continue; }
-            json_edit "$PICKED" '.hopping=$v' --arg v "$value" || { tell_warn 失败; wait_key; continue; }
-          fi
-        else tell_warn "无效"; sleep 1; continue; fi ;;
+  tell "  1. BBR conservative"; tell "  2. BBR standard"; tell "  3. BBR aggressive"; tell "  4. Brutal"
+  while :; do
+    case $(prompt "请选择" 2) in
+      1) bbr=conservative; up=0; down=0; break ;;
+      2) bbr=standard; up=0; down=0; break ;;
+      3) bbr=aggressive; up=0; down=0; break ;;
+      4) bbr=""
+         while :; do
+           up=$(prompt "上行 Mbps" "$(jq -r '.meta.up_mbps//0' "$PICKED")"); [[ $up =~ ^[0-9]+$ ]] || { tell_warn 无效; continue; }
+           down=$(prompt "下行 Mbps" "$(jq -r '.meta.down_mbps//0' "$PICKED")"); [[ $down =~ ^[0-9]+$ ]] || { tell_warn 无效; continue; }
+           { [ "$up" -gt 0 ] || [ "$down" -gt 0 ]; } && break
+           tell_warn "至少一个方向"
+         done; break ;;
+      *) tell_warn 无效; sleep 1 ;;
+    esac
+  done
+  if [ "$bbr" != "" ]; then
+    json_edit "$PICKED" '.meta.up_mbps=0|.meta.down_mbps=0|.meta.bbr_profile=$b|del(.inbound.up_mbps,.inbound.down_mbps,.inbound.bbr_profile)' --arg b "$bbr" || { tell_warn 失败; wait_key; continue; }
+  else
+    json_edit "$PICKED" '.meta.up_mbps=$u|.meta.down_mbps=$d|.meta.bbr_profile=""|del(.inbound.up_mbps,.inbound.down_mbps,.inbound.bbr_profile)' --argjson u "$up" --argjson d "$down" || { tell_warn 失败; wait_key; continue; }
+  fi
+else tell_warn 无效; sleep 1; continue; fi ;;
       5)
         if [ "$kind" = vless-reality ]; then
           while :; do
