@@ -387,26 +387,27 @@ inbounds=$(jq -n --argjson addr "$tun_addr" \
   rules=$(build_route_rules direct)
 
   local dns_block
-dns_block=$(build_dns_block "$final" "$dns_direct")
+dns_block=$(build_dns_block "$final" "$dns_direct" "$strat")
 
-  jq -n \
-  --argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
-  --argjson rules "$rules" \
-  --argjson dns "$dns_block" --argjson providers "$providers" \
-  --arg final "$final" --argjson use_tun "$use_tun" \
-  --arg iface4 "$NET_IF_V4" --arg iface6 "$NET_IF_V6" '{
-    log:{level:"warn",timestamp:true},
-    dns:$dns,
-    inbounds:$inbounds,
-    outbounds:$outbounds,
-    route:{
-      rules:$rules,
-      final:$final,
-      auto_detect_interface:true,
-      default_domain_resolver:{server:"dns-bootstrap"}
-    }
-  } |
-  if ($providers|length)>0 then .certificate_providers=$providers else . end'
+jq -n \
+--argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
+--argjson rules "$rules" \
+--argjson dns "$dns_block" --argjson providers "$providers" \
+--arg final "$final" --argjson use_tun "$use_tun" \
+--arg strat "$strat" '{
+  log:{level:"warn",timestamp:true},
+  dns:$dns,
+  inbounds:$inbounds,
+  outbounds:$outbounds,
+  route:{
+    rules:$rules,
+    final:$final,
+    auto_detect_interface:true,
+    default_domain_resolver:{server:"dns-bootstrap", strategy:$strat}
+  }
+} |
+if ($providers|length)>0 then .certificate_providers=$providers else . end'
+
 } 
 
 ssh_ports(){
