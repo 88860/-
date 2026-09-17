@@ -233,7 +233,7 @@ load_net_cache(){
 
 dns_strategy(){
   case "$NET_STACK" in
-    both) [ "${IPV6_OK:-0}" = "1" ] && printf 'prefer_ipv4' || printf 'ipv4_only' ;;
+    both) [ "${IPV6_OK:-0}" = "1" ] && printf 'prefer_ipv6' || printf 'prefer_ipv4' ;;
     v4)   printf 'ipv4_only' ;;
     v6)   printf 'ipv6_only' ;;
     *)    printf 'ipv4_only' ;;
