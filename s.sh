@@ -1981,12 +1981,13 @@ wg_setup(){
      {role:"server",enabled:false,private_key:$private,public_key:$public,
       address:[$a4,$a6],listen_port:$port,
       peer_public_key:$peer_key,peer_ip:$peer4,peer_host:"",peer_port:0,
-      endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,mtu:1408,
+      endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,
+        mtu:1280,
         address:[$a4,$a6],private_key:$private,listen_port:$port,
         peers:[{public_key:$peer_key,allowed_ips:[($peer4+"/32"),($peer6+"/128")]}]}}')
   else
     address4="$prefix.2/32"; address6="$ipv6_prefix::2/128"; peer_ip4="$prefix.1"
-    peer_host=$(prompt "服务端 IP" "1.1.1.1")
+    peer_host=$(prompt "服务端 IP 或域名" "1.1.1.1")
     peer_port=$(prompt "服务端监听端口" "$(random_port)")
     peer_key=$(prompt "服务端公钥")
     [[ $peer_port =~ ^[0-9]+$ ]] && [ "$peer_port" -ge 1 ] && [ "$peer_port" -le 65535 ] || { tell_warn "端口必须为 1-65535"; wait_key; return; }
@@ -1996,7 +1997,8 @@ wg_setup(){
      {role:"client",enabled:false,private_key:$private,public_key:$public,
       address:[$a4,$a6],listen_port:0,
       peer_public_key:$peer_key,peer_ip:$peer4,peer_host:$host,peer_port:$port,
-      endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,mtu:1408,
+      endpoint:{type:"wireguard",tag:"wireguard",system:true,name:$iface,
+        mtu:1280,
         address:[$a4,$a6],private_key:$private,
         peers:[{address:$host,port:$port,public_key:$peer_key,
                 allowed_ips:["0.0.0.0/0","::/0"]}]}}')
