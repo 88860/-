@@ -617,7 +617,7 @@ build_config(){
         address:["172.19.0.1/30","fdfe:dcba:9876::1/126"],
         dns_mode:"hijack",
         dns_address:["172.19.0.2","fdfe:dcba:9876::2"],
-        auto_route:true,auto_redirect:true,strict_route:true,
+        auto_route:true,strict_route:true,
         stack:"mixed",mtu:9000}] + $list')
   fi
 
