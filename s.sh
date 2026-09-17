@@ -2181,7 +2181,6 @@ wg_delete(){
   clear
   [ -f "$WG_CONF" ] || { tell_warn "未配置 WireGuard"; wait_key; return; }
   role=$(jq -r '.role // ""' "$WG_CONF" 2>/dev/null)
-  tell_warn "仅删除 WireGuard 配置，不停止 sing-box"
   prompt_yes "确认删除 WireGuard 配置" || return
   previous_exit=$(state_get exit)
   backup_wg=$(mktemp -d) || { tell_warn "临时目录创建失败"; wait_key; return; }
@@ -2216,7 +2215,7 @@ wg_delete(){
     rm -f "$tmp"; rm -rf "$backup_wg" "$backup_conf"
     sync_bypass_rules
     sync_hopping_rules
-    tell_ok "WireGuard 配置已删除，其他 sing-box 协议保持运行"
+    tell_ok "WireGuard 配置已删除"
   else
     rm -f "$tmp"
     rm -rf "$WG_DIR"
