@@ -586,13 +586,13 @@ build_config(){
                 then del(.bbr_profile)
                 else . end) as $in2 |
         if .tls_mode=="acme" then
-          $in2 * {tls: ({enabled:true,server_name:$d}
+          $in2 * {tls: ({enabled:true,server_name:$d} 
                        + (if .alpn then {alpn:.alpn} else {} end)
                        + $x)}
         else $in2 end ]' "${node_files[@]}") || return 1
   fi
 
-  outbounds='[{"type":"direct","tag":"direct","domain_resolver":"dns-direct-cf-v4","network_strategy":"prefer_ipv4","fallback_delay":"300ms"}]'
+  outbounds='[{"type":"direct","tag":"direct","domain_resolver":"dns-direct-cf-v4","fallback_delay":"300ms"}]'
 
   if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
     if [ "$(jq -r .role "$WG_CONF")" = client ]; then
@@ -609,7 +609,7 @@ build_config(){
   if [ "$selected" != direct ] && [ "$selected" != wireguard ]; then
     if [ -f "$PEER_DIR/$selected.json" ]; then
       outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$selected.json" \
-        '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",network_strategy:"prefer_ipv4",fallback_delay:"300ms"}]')
+        '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",fallback_delay:"300ms"}]')
       final=$selected; use_tun=1
       peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
     else
@@ -619,7 +619,7 @@ build_config(){
 
   if [ -n "$probe_target" ] && [ "$probe_target" != "direct" ] && [ "$probe_target" != "wireguard" ] && [ -f "$PEER_DIR/$probe_target.json" ]; then
     outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$probe_target.json" \
-      '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",network_strategy:"prefer_ipv4",fallback_delay:"300ms"}]')
+      '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",fallback_delay:"300ms"}]')
   fi
 
   if [ "$use_tun" = 1 ]; then
@@ -686,8 +686,10 @@ build_config(){
   ] else [] end)
 ) as $servers |
     {
-      servers: $servers,
-      rules: ($node_rules + [
+      # 修改5：添加全局 DNS 策略，优先 IPv6，实现双栈
+      "strategy": "prefer_ipv6",
+      "servers": $servers,
+      "rules": ($node_rules + [
         {action:"evaluate",server:"dns-cf-v4",tag:"remote-a"}
       ]
       + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa"}] else [] end)
@@ -717,7 +719,7 @@ build_config(){
      route:{rules:$rules,final:$final,
             auto_detect_interface:$auto_detect,
             default_domain_resolver:"dns-direct-cf-v4",
-            default_network_strategy:"prefer_ipv4",
+            default_network_strategy:"default",
             default_fallback_delay:"300ms",
             default_http_client:"default"}}
     | if ($endpoints|length)>0 then .endpoints=$endpoints else . end
