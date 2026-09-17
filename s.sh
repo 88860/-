@@ -410,10 +410,8 @@ build_config(){
         default_domain_resolver:{server:"dns-bootstrap",strategy:$strat}
       } |
       if $use_tun==1 then
-        .default_network_strategy="fallback" |
-        .default_fallback_network_type="all" |
-        .default_fallback_delay="300ms"
-      else . end)
+  .auto_detect_interface=true
+else . end
     } |
     if ($providers|length)>0 then .certificate_providers=$providers else . end'
 }
