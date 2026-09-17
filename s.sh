@@ -394,7 +394,7 @@ build_config(){
   local dns_block
   dns_block=$(build_dns_block "$final" "$dns_direct" "$strat")
 
-  jq -n \
+    jq -n \
     --argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
     --argjson rules "$rules" \
     --argjson dns "$dns_block" --argjson providers "$providers" \
@@ -409,10 +409,10 @@ build_config(){
         final:$final,
         default_domain_resolver:{server:"dns-bootstrap",strategy:$strat}
       } |
-            if $use_tun==1 then
-  .auto_detect_interface=true
-else . end
-    } |
+      if $use_tun==1 then
+        .auto_detect_interface=true
+      else . end
+    ) |
     if ($providers|length)>0 then .certificate_providers=$providers else . end'
 }
 
