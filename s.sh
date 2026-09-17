@@ -409,10 +409,10 @@ build_config(){
         final:$final,
         default_domain_resolver:{server:"dns-bootstrap",strategy:$strat}
       } |
-      if $use_tun==1 then
-        .auto_detect_interface=true
-      else . end
-    ) |
+            if $use_tun==1 then
+  .auto_detect_interface=true
+else . end
+    } |
     if ($providers|length)>0 then .certificate_providers=$providers else . end'
 }
 
