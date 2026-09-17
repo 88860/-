@@ -409,6 +409,8 @@ if [ "$selected" != direct ]; then
     }
   } |
   if ($providers|length)>0 then .certificate_providers=$providers else . end'
+} 
+
 ssh_ports(){
   {
     [ -n "$SSH_CONNECTION" ] && awk '{print $4}' <<<"$SSH_CONNECTION"
