@@ -254,7 +254,6 @@ build_dns_block(){
   local bserver="1.1.1.1"
   [ "$strat" = "ipv6_only" ] && bserver="2606:4700:4700::1111"
   jq -n --arg strat "$strat" --arg final "$final" --arg bserver "$bserver" --argjson dns_direct "$dns_direct" '{
-    strategy: $strat,
     servers: [
       {
         type:"https", tag:"dns-bootstrap", server:$bserver, server_port:443,
@@ -266,7 +265,11 @@ build_dns_block(){
         domain_resolver:{server:"dns-bootstrap"}
       }
     ],
-    final: "dns-remote"
+    final: "dns-remote",
+    rules: [
+      { action:"evaluate", server:"dns-remote", tag:"remote-response" },
+      { match_response:"remote-response", action:"route", server:"dns-remote", strategy:$strat }
+    ]
   } |
   if $dns_direct==1 then .servers |= map(if .tag=="dns-bootstrap" then .detour="dns-direct" else . end) else . end |
   if $final != "direct" then
