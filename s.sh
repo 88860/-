@@ -250,10 +250,11 @@ tun_addresses(){
 }
 
 build_dns_block(){
-  local final="$1" dns_direct="$2"
+  local final="$1" dns_direct="$2" strat="$3"
   local bserver="1.1.1.1"
-  [ "$(dns_strategy)" = "ipv6_only" ] && bserver="2606:4700:4700::1111"
-  jq -n --arg final "$final" --arg bserver "$bserver" --argjson dns_direct "$dns_direct" '{
+  [ "$strat" = "ipv6_only" ] && bserver="2606:4700:4700::1111"
+  jq -n --arg final "$final" --arg bserver "$bserver" --argjson dns_direct "$dns_direct" --arg strat "$strat" '{
+    strategy: $strat,
     servers: [
       {
         type:"https", tag:"dns-bootstrap", server:$bserver, server_port:443,
