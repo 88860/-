@@ -404,16 +404,16 @@ build_config(){
       dns:$dns,
       inbounds:$inbounds,
       outbounds:$outbounds,
-      route:({
-        rules:$rules,
-        final:$final,
-        default_domain_resolver:{server:"dns-bootstrap",strategy:$strat}
-      } |
-      if $use_tun==1 then
-  .auto_detect_interface=true
-else . end
-    } |
-    if ($providers|length)>0 then .certificate_providers=$providers else . end'
+        route:({
+    rules:$rules,
+    final:$final,
+    default_domain_resolver:{server:"dns-bootstrap",strategy:$strat}
+  } |
+  if $use_tun==1 then
+    .auto_detect_interface=true
+  else . end
+) |
+if ($providers|length)>0 then .certificate_providers=$providers else . end'
 }
 
 ssh_ports(){
