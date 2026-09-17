@@ -7,7 +7,6 @@ GREEN='\033[32m'
 CYAN='\033[36m'
 YELLOW='\033[33m'
 PURPLE='\033[35m'
-BLUE='\033[34m'
 PLAIN='\033[0m'
 
 SB_DIR=/etc/sing-box
@@ -133,7 +132,6 @@ slugify(){ printf '%s' "$1" | tr -cd 'A-Za-z0-9_-' | cut -c1-20; }
 random_password(){ openssl rand -hex 8; }
 random_uuid(){ cat /proc/sys/kernel/random/uuid; }
 random_port(){ shuf -i 20000-60000 -n1; }
-version_ge(){ [ -n "$1" ] && [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
 json_write(){
   local dest=$1 tmp
