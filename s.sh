@@ -267,9 +267,9 @@ build_dns_block(){
     ],
     final: "dns-remote",
     rules: [
-      { action:"evaluate", server:"dns-remote", tag:"remote-response" },
-      { match_response:"remote-response", action:"route", server:"dns-remote", strategy:$strat }
-    ]
+  { action:"evaluate", server:"dns-remote", tag:"remote-response" },
+  { match_response:"remote-response", action:"route", server:"dns-remote" }
+]
   } |
   if $dns_direct==1 then .servers |= map(if .tag=="dns-bootstrap" then .detour="dns-direct" else . end) else . end |
   if $final != "direct" then
