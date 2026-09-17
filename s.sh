@@ -618,7 +618,7 @@ build_config(){
         dns_mode:"hijack",
         dns_address:["172.19.0.2","fdfe:dcba:9876::2"],
         auto_route:true,strict_route:true,
-        stack:"mixed",mtu:9000}] + $list')
+        stack:"system",mtu:9000}] + $list')
   fi
 
   if [ "$final" = "wireguard" ]; then icmp_out="wireguard"; else icmp_out="direct"; fi
