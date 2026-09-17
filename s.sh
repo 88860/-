@@ -359,14 +359,13 @@ build_config(){
   fi
 
   outbounds='[{"type":"direct","tag":"direct"}]'
-  local dns_iface="" dns_direct=0
-  if [ -n "$NET_IF_V4" ]; then dns_iface="$NET_IF_V4"; elif [ -n "$NET_IF_V6" ]; then dns_iface="$NET_IF_V6"; fi
-  if [ -n "$dns_iface" ]; then
-    outbounds=$(jq --arg iface "$dns_iface" '. + [{"type":"direct","tag":"dns-direct","bind_interface":$iface}]' <<<"$outbounds")
-    dns_direct=1
-  fi
+local dns_direct=0
+if [ -n "$NET_IF_V4" ] || [ -n "$NET_IF_V6" ]; then
+  outbounds=$(jq '. + [{"type":"direct","tag":"dns-direct"}]' <<<"$outbounds")
+  dns_direct=1
+fi
 
-  if [ "$selected" != direct ]; then
+if [ "$selected" != direct ]; then
     if [ -f "$PEER_DIR/$selected.json" ]; then
       local out
       out=$(jq -c --arg tag "$selected" \
