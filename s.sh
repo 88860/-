@@ -664,7 +664,7 @@ build_config(){
 
   if [ "$use_tun" = 1 ]; then auto_detect="true"; else auto_detect="false"; fi
 
-  dns_block=$(jq -n --arg host "$peer_host" \
+    dns_block=$(jq -n --arg host "$peer_host" \
                     --arg cf4 "$dns_cf_v4" --arg cf6 "$dns_cf_v6" \
                     --arg gg4 "$dns_google_v4" --arg gg6 "$dns_google_v6" \
                     --arg dns_detour "$dns_detour" \
@@ -688,27 +688,27 @@ build_config(){
     else [] end) as $node_rules |
   (
   [
-    {type:"udp",tag:"dns-cf-v4",server:$cf4,server_port:53,detour:$dns_detour},
-    {type:"udp",tag:"dns-google-v4",server:$gg4,server_port:53,detour:$dns_detour},
-    {type:"udp",tag:"dns-direct-cf-v4",server:$cf4,server_port:53,detour:"direct"},
-    {type:"udp",tag:"dns-direct-google-v4",server:$gg4,server_port:53,detour:"direct"}
+    {type:"udp",tag:"dns-cf-v4",server:$cf4,server_port:53,detour:$dns_detour,strategy:$dns_strategy},
+    {type:"udp",tag:"dns-google-v4",server:$gg4,server_port:53,detour:$dns_detour,strategy:$dns_strategy},
+    {type:"udp",tag:"dns-direct-cf-v4",server:$cf4,server_port:53,detour:"direct",strategy:$dns_strategy},
+    {type:"udp",tag:"dns-direct-google-v4",server:$gg4,server_port:53,detour:"direct",strategy:$dns_strategy}
   ] + (if $has_v6 == 1 then [
-    {type:"udp",tag:"dns-cf-v6",server:$cf6,server_port:53,detour:$dns_detour},
-    {type:"udp",tag:"dns-google-v6",server:$gg6,server_port:53,detour:$dns_detour},
-    {type:"udp",tag:"dns-direct-cf-v6",server:$cf6,server_port:53,detour:"direct"},
-    {type:"udp",tag:"dns-direct-google-v6",server:$gg6,server_port:53,detour:"direct"}
+    {type:"udp",tag:"dns-cf-v6",server:$cf6,server_port:53,detour:$dns_detour,strategy:$dns_strategy},
+    {type:"udp",tag:"dns-google-v6",server:$gg6,server_port:53,detour:$dns_detour,strategy:$dns_strategy},
+    {type:"udp",tag:"dns-direct-cf-v6",server:$cf6,server_port:53,detour:"direct",strategy:$dns_strategy},
+    {type:"udp",tag:"dns-direct-google-v6",server:$gg6,server_port:53,detour:"direct",strategy:$dns_strategy}
   ] else [] end)
 ) as $servers |
     {
       "servers": $servers,
-            "rules": ($node_rules + [
+      "rules": ($node_rules + [
         {action:"evaluate",server:"dns-cf-v4",tag:"remote-a"}
       ]
       + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa"}] else [] end)
       + [
         {action:"evaluate",server:"dns-google-v4",tag:"remote-gg-a"}
       ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa"}] else [] end))
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa"}] else [] end)
       + [
         {match_response:"remote-a",action:"route",server:"dns-cf-v4"},
         {match_response:"remote-gg-a",action:"route",server:"dns-google-v4"}
@@ -717,7 +717,9 @@ build_config(){
         {match_response:"remote-aaaa",action:"route",server:"dns-cf-v6",race:true},
         {match_response:"remote-gg-aaaa",action:"route",server:"dns-google-v6",race:true}
       ] else [] end))
-    }')
+    }'
+)
+
 
   jq -n --argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
         --argjson endpoints "$endpoints" --argjson rules "$rules" \
