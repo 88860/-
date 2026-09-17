@@ -250,10 +250,10 @@ tun_addresses(){
 }
 
 build_dns_block(){
-  local strat="$1" final="$2" dns_direct="$3"
+  local final="$1" dns_direct="$2"
   local bserver="1.1.1.1"
-  [ "$strat" = "ipv6_only" ] && bserver="2606:4700:4700::1111"
-  jq -n --arg strat "$strat" --arg final "$final" --arg bserver "$bserver" --argjson dns_direct "$dns_direct" '{
+  [ "$(dns_strategy)" = "ipv6_only" ] && bserver="2606:4700:4700::1111"
+  jq -n --arg final "$final" --arg bserver "$bserver" --argjson dns_direct "$dns_direct" '{
     servers: [
       {
         type:"https", tag:"dns-bootstrap", server:$bserver, server_port:443,
@@ -265,11 +265,7 @@ build_dns_block(){
         domain_resolver:{server:"dns-bootstrap"}
       }
     ],
-    final: "dns-remote",
-    rules: [
-  { action:"evaluate", server:"dns-remote", tag:"remote-response" },
-  { match_response:"remote-response", action:"route", server:"dns-remote" }
-]
+    final: "dns-remote"
   } |
   if $dns_direct==1 then .servers |= map(if .tag=="dns-bootstrap" then .detour="dns-direct" else . end) else . end |
   if $final != "direct" then
