@@ -375,11 +375,12 @@ if [ "$selected" != direct ]; then
   if [ "$use_tun" = "1" ]; then
     local tun_addr
     tun_addr=$(tun_addresses)
-    inbounds=$(jq -n --argjson addr "$tun_addr" \
-      --argjson list "$inbounds" \
-      '[{ type:"tun", tag:"tun-in", interface_name:"sbmtun",
-         address:$addr, auto_route:true, strict_route:true,
-         route_exclude_address:[] }] + $list')
+
+inbounds=$(jq -n --argjson addr "$tun_addr" \
+  --argjson list "$inbounds" \
+  '[{ type:"tun", tag:"tun-in", interface_name:"sbmtun",
+     address:$addr, auto_route:true, strict_route:true,
+     endpoint_independent_nat:true, route_exclude_address:[] }] + $list')
   fi
 
   rules=$(build_route_rules direct)
