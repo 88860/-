@@ -641,7 +641,7 @@ build_config(){
     rules=$(jq -n --argjson list "$rules" --arg target "$probe_target" '[{inbound:["probe-in"],action:"route",outbound:$target}] + $list')
   fi
 
-  if [ "$use_tun" = 1 ]; then auto_detect="true"; else auto_detect="false"; fi
+  auto_detect="false"
 
   dns_block=$(jq -n --arg direct "$dns_direct_server" --arg strategy "$dns_strategy" --arg detour "$final" '
     {servers:[
