@@ -701,14 +701,14 @@ build_config(){
 ) as $servers |
     {
       "servers": $servers,
-      "rules": ($node_rules + [
-        {action:"evaluate",server:"dns-cf-v4",tag:"remote-a",strategy:$dns_strategy}
+            "rules": ($node_rules + [
+        {action:"evaluate",server:"dns-cf-v4",tag:"remote-a"}
       ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa",strategy:$dns_strategy}] else [] end)
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa"}] else [] end)
       + [
-        {action:"evaluate",server:"dns-google-v4",tag:"remote-gg-a",strategy:$dns_strategy}
+        {action:"evaluate",server:"dns-google-v4",tag:"remote-gg-a"}
       ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa",strategy:$dns_strategy}] else [] end)
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa"}] else [] end))
       + [
         {match_response:"remote-a",action:"route",server:"dns-cf-v4"},
         {match_response:"remote-gg-a",action:"route",server:"dns-google-v4"}
