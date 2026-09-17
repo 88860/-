@@ -2192,7 +2192,6 @@ wg_delete(){
   clear
   [ -f "$WG_CONF" ] || { tell_warn "未配置 WireGuard"; wait_key; return; }
   role=$(jq -r '.role // ""' "$WG_CONF" 2>/dev/null)
-  tell_warn "仅删除 WireGuard 配置，不停止 sing-box"
   prompt_yes "确认删除 WireGuard 配置" || return
   previous_exit=$(state_get exit)
   backup_wg=$(mktemp -d) || { tell_warn "临时目录创建失败"; wait_key; return; }
@@ -2219,7 +2218,7 @@ wg_delete(){
         [ "$role" = server ] && wg_server_nat_apply
         timeout 15 systemctl restart sing-box >/dev/null 2>&1 || true
         rm -f "$tmp"; rm -rf "$backup_wg" "$backup_conf"
-        tell_warn "删除失败，已恢复原配置，sing-box 未停止"
+        tell_warn "删除失败，已恢复原配置"
         wait_key
         return
       fi
@@ -2227,7 +2226,7 @@ wg_delete(){
     rm -f "$tmp"; rm -rf "$backup_wg" "$backup_conf"
     sync_bypass_rules
     sync_hopping_rules
-    tell_ok "WireGuard 配置已删除，其他 sing-box 协议保持运行"
+    tell_ok "WireGuard 配置已删除"
   else
     rm -f "$tmp"
     rm -rf "$WG_DIR"
@@ -2369,7 +2368,7 @@ run_uninstall(){
   rm -rf "$SB_DIR" "$SBM_DIR" /var/lib/sing-box "$CORE" "$SHORTCUT"
   if [ ${#packages[@]} -gt 0 ]; then
     tell "脚本曾安装过: [ ${packages[*]} ]"
-    if prompt_yes "是否移除依赖组件 (仅执行 remove，不触碰系统核心包)"; then
+    if prompt_yes "是否移除依赖组件"; then
       apt-get remove -y -q "${packages[@]}" >/dev/null 2>&1
       apt-get autoremove -y -q >/dev/null 2>&1
     fi
