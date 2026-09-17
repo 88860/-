@@ -385,7 +385,7 @@ if [ "$selected" != direct ]; then
   rules=$(build_route_rules direct)
 
   local dns_block
-  dns_block=$(build_dns_block "$strat" "$final" "$dns_direct")
+dns_block=$(build_dns_block "$final" "$dns_direct")
 
   jq -n \
   --argjson inbounds "$inbounds" --argjson outbounds "$outbounds" \
