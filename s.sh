@@ -551,7 +551,7 @@ build_config(){
   local selected domain inbounds outbounds endpoints rules dns_block final use_tun
   local peer_host node_files tls_extra providers probe_target
   local dns_cf_v4 dns_cf_v6 dns_google_v4 dns_google_v6 auto_detect icmp_out
-  local net_has_v6=0
+  local net_has_v6=0 dns_detour dns_strategy
 
   selected=$(state_get exit); domain=$(state_get domain)
   probe_target=${WATCHDOG_PROBE:-}
@@ -563,10 +563,14 @@ build_config(){
     net_has_v6=1
     dns_cf_v6="2606:4700:4700::1111"
     dns_google_v6="2001:4860:4860::8888"
+    dns_strategy="prefer_ipv6"
   elif [ "$NET_STACK" = "v6" ]; then
     net_has_v6=1
     dns_cf_v6="2606:4700:4700::1111"
     dns_google_v6="2001:4860:4860::8888"
+    dns_strategy="prefer_ipv6"
+  else
+    dns_strategy="prefer_ipv4"
   fi
 
   node_files=("$NODE_DIR"/*.json)
@@ -597,13 +601,19 @@ build_config(){
   if [ -f "$WG_CONF" ] && [ "$(jq -r '.enabled//false' "$WG_CONF")" = true ]; then
     if [ "$(jq -r .role "$WG_CONF")" = client ]; then
       if [ "$selected" = "direct" ] || [ "$selected" = "wireguard" ]; then
-        endpoints=$(jq '[.endpoint]' "$WG_CONF")
+        endpoints=$(jq '[.endpoint | .domain_resolver = (.domain_resolver // "dns-direct-cf-v4")]' "$WG_CONF")
         peer_host=$(jq -r '.peer_host//""' "$WG_CONF")
         final="wireguard"; use_tun=1
       fi
     else
-      endpoints=$(jq '[.endpoint]' "$WG_CONF")
+      endpoints=$(jq '[.endpoint | .domain_resolver = (.domain_resolver // "dns-direct-cf-v4")]' "$WG_CONF")
     fi
+  fi
+
+  if [ "$final" = "direct" ]; then
+    dns_detour="direct"
+  else
+    dns_detour="$final"
   fi
 
   if [ "$selected" != direct ] && [ "$selected" != wireguard ]; then
@@ -611,9 +621,10 @@ build_config(){
       outbounds=$(jq -n --argjson base "$outbounds" --slurpfile peer "$PEER_DIR/$selected.json" \
         '$base + [$peer[0].outbound + {domain_resolver:"dns-direct-cf-v4",fallback_delay:"300ms"}]')
       final=$selected; use_tun=1
+      dns_detour="$final"
       peer_host=$(jq -r '.outbound.server//""' "$PEER_DIR/$selected.json")
     else
-      out_warn "出口节点 $selected 文件不存在，回退直连"; final=direct
+      out_warn "出口节点 $selected 文件不存在，回退直连"; final=direct; dns_detour="direct"
     fi
   fi
 
@@ -632,7 +643,7 @@ build_config(){
 
   if [ "$final" = "wireguard" ]; then icmp_out="wireguard"; else icmp_out="direct"; fi
 
-  rules=$(jq -n --arg host "$peer_host" --arg cf4 "$dns_cf_v4" --arg icmp "$icmp_out" '
+  rules=$(jq -n --arg host "$peer_host" --arg icmp "$icmp_out" '
     [{network:"icmp",action:"route",outbound:$icmp},
      {action:"sniff"},
      {protocol:"dns",action:"hijack-dns"}]
@@ -644,8 +655,7 @@ build_config(){
        else
          [{domain:[$host],action:"route",outbound:"direct"}]
        end)
-    + [{ip_cidr:[($cf4+"/32")],action:"route",outbound:"direct"}]
-    + [{ip_is_private:true,action:"route",outbound:"direct"}]')
+    + [{ip_is_private:true,action:"route",outbound:"direct"}])')
 
   if [ -n "$probe_target" ]; then
     inbounds=$(jq -n --argjson list "$inbounds" '[{type:"mixed",tag:"probe-in",listen:"127.0.0.1",listen_port:2081}] + $list')
@@ -657,8 +667,12 @@ build_config(){
   dns_block=$(jq -n --arg host "$peer_host" \
                     --arg cf4 "$dns_cf_v4" --arg cf6 "$dns_cf_v6" \
                     --arg gg4 "$dns_google_v4" --arg gg6 "$dns_google_v6" \
+                    --arg dns_detour "$dns_detour" \
+                    --arg dns_strategy "$dns_strategy" \
                     --argjson has_v6 "$net_has_v6" '
-    (if $host != "" and ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") | not) and ($host | test("^[0-9a-fA-F:]+$") | not) then
+    (if $host != "" 
+        and ($host | test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$") | not)
+        and ($host | test("^[0-9a-fA-F:]+$") | not) then
       [{action:"evaluate",server:"dns-direct-cf-v4",tag:"node-a"}]
       + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-direct-cf-v6",tag:"node-aaaa"}] else [] end)
       + [{action:"evaluate",server:"dns-direct-google-v4",tag:"node-gg-a"}]
@@ -674,29 +688,27 @@ build_config(){
     else [] end) as $node_rules |
   (
   [
-    {type:"udp",tag:"dns-cf-v4",server:$cf4,server_port:53},
-    {type:"udp",tag:"dns-google-v4",server:$gg4,server_port:53},
-    {type:"udp",tag:"dns-direct-cf-v4",server:$cf4,server_port:53},
-    {type:"udp",tag:"dns-direct-google-v4",server:$gg4,server_port:53}
+    {type:"udp",tag:"dns-cf-v4",server:$cf4,server_port:53,detour:$dns_detour},
+    {type:"udp",tag:"dns-google-v4",server:$gg4,server_port:53,detour:$dns_detour},
+    {type:"udp",tag:"dns-direct-cf-v4",server:$cf4,server_port:53,detour:"direct"},
+    {type:"udp",tag:"dns-direct-google-v4",server:$gg4,server_port:53,detour:"direct"}
   ] + (if $has_v6 == 1 then [
-    {type:"udp",tag:"dns-cf-v6",server:$cf6,server_port:53},
-    {type:"udp",tag:"dns-google-v6",server:$gg6,server_port:53},
-    {type:"udp",tag:"dns-direct-cf-v6",server:$cf6,server_port:53},
-    {type:"udp",tag:"dns-direct-google-v6",server:$gg6,server_port:53}
+    {type:"udp",tag:"dns-cf-v6",server:$cf6,server_port:53,detour:$dns_detour},
+    {type:"udp",tag:"dns-google-v6",server:$gg6,server_port:53,detour:$dns_detour},
+    {type:"udp",tag:"dns-direct-cf-v6",server:$cf6,server_port:53,detour:"direct"},
+    {type:"udp",tag:"dns-direct-google-v6",server:$gg6,server_port:53,detour:"direct"}
   ] else [] end)
 ) as $servers |
     {
-      # 修改5：添加全局 DNS 策略，优先 IPv6，实现双栈
-      "strategy": "prefer_ipv6",
       "servers": $servers,
       "rules": ($node_rules + [
-        {action:"evaluate",server:"dns-cf-v4",tag:"remote-a"}
+        {action:"evaluate",server:"dns-cf-v4",tag:"remote-a",strategy:$dns_strategy}
       ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa"}] else [] end)
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-cf-v6",tag:"remote-aaaa",strategy:$dns_strategy}] else [] end)
       + [
-        {action:"evaluate",server:"dns-google-v4",tag:"remote-gg-a"}
+        {action:"evaluate",server:"dns-google-v4",tag:"remote-gg-a",strategy:$dns_strategy}
       ]
-      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa"}] else [] end)
+      + (if $has_v6 == 1 then [{action:"evaluate",server:"dns-google-v6",tag:"remote-gg-aaaa",strategy:$dns_strategy}] else [] end)
       + [
         {match_response:"remote-a",action:"route",server:"dns-cf-v4"},
         {match_response:"remote-gg-a",action:"route",server:"dns-google-v4"}
