@@ -655,7 +655,7 @@ build_config(){
        else
          [{domain:[$host],action:"route",outbound:"direct"}]
        end)
-    + [{ip_is_private:true,action:"route",outbound:"direct"}])')
+    + [{ip_is_private:true,action:"route",outbound:"direct"}]')
 
   if [ -n "$probe_target" ]; then
     inbounds=$(jq -n --argjson list "$inbounds" '[{type:"mixed",tag:"probe-in",listen:"127.0.0.1",listen_port:2081}] + $list')
