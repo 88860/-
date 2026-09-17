@@ -672,19 +672,19 @@ build_config(){
         {match_response:"node-gg-aaaa",action:"route",server:"dns-direct-google-v6",race:true}
       ] else [] end)
     else [] end) as $node_rules |
-    (
-      [
-        {tag:"dns-cf-v4",server:"udp://"+$cf4},
-        {tag:"dns-google-v4",server:"udp://"+$gg4},
-        {tag:"dns-direct-cf-v4",server:"udp://"+$cf4},
-        {tag:"dns-direct-google-v4",server:"udp://"+$gg4}
-      ] + (if $has_v6 == 1 then [
-        {tag:"dns-cf-v6",server:"udp://["+$cf6+"]"},
-        {tag:"dns-google-v6",server:"udp://["+$gg6+"]"},
-        {tag:"dns-direct-cf-v6",server:"udp://["+$cf6+"]"},
-        {tag:"dns-direct-google-v6",server:"udp://["+$gg6+"]"}
-      ] else [] end)
-    ) as $servers |
+  (
+  [
+    {type:"udp",tag:"dns-cf-v4",server:$cf4,server_port:53},
+    {type:"udp",tag:"dns-google-v4",server:$gg4,server_port:53},
+    {type:"udp",tag:"dns-direct-cf-v4",server:$cf4,server_port:53},
+    {type:"udp",tag:"dns-direct-google-v4",server:$gg4,server_port:53}
+  ] + (if $has_v6 == 1 then [
+    {type:"udp",tag:"dns-cf-v6",server:$cf6,server_port:53},
+    {type:"udp",tag:"dns-google-v6",server:$gg6,server_port:53},
+    {type:"udp",tag:"dns-direct-cf-v6",server:$cf6,server_port:53},
+    {type:"udp",tag:"dns-direct-google-v6",server:$gg6,server_port:53}
+  ] else [] end)
+) as $servers |
     {
       servers: $servers,
       rules: ($node_rules + [
