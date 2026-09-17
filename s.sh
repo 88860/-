@@ -719,7 +719,6 @@ build_config(){
      route:{rules:$rules,final:$final,
             auto_detect_interface:$auto_detect,
             default_domain_resolver:"dns-direct-cf-v4",
-            default_network_strategy:"default",
             default_fallback_delay:"300ms",
             default_http_client:"default"}}
     | if ($endpoints|length)>0 then .endpoints=$endpoints else . end
