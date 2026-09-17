@@ -289,9 +289,9 @@ build_config(){
   local selected domain final=direct use_tun=0
   local inbounds='[]' outbounds='[]' rules='[]' providers='[]'
   local node_files=()
-  local strat f
+  local f
 
-  selected=$(state_get exit); domain=$(state_get domain); strat=$(dns_strategy)
+  selected=$(state_get exit); domain=$(state_get domain)
 
   if compgen -G "$NODE_DIR/*.json" >/dev/null 2>&1; then
     while IFS= read -r -d '' f; do node_files+=("$f"); done \
