@@ -843,7 +843,7 @@ certificate_ready(){
 wait_for_certificate(){
   local domain=$1 pid=${2:-} log_file=${3:-} start=$SECONDS log
   tell "等待证书签发完成: $domain"
-  tell "最长等待 3 分钟，超时将停止当前操作并回滚"
+  tell "证书签发最长等待 3 分钟，超时将自动停止操作"
   while :; do
     if certificate_ready "$domain"; then
       tell_ok "证书已成功签发并完成校验"
