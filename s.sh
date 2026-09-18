@@ -837,11 +837,11 @@ setup_certificate(){
   else domain=$(prompt "输入域名"); [ -n "$domain" ] || return 1; fi
   email=$(prompt "ACME 通知邮箱" "admin@$domain"); [ -n "$email" ] || return 1
   printf '\n  %b选择域名证书验证方式:%b\n' "${CYAN}" "${PLAIN}"
-  echo "  1. HTTP-01      (推荐，需放行 80 端口)"
-  echo "  2. TLS-ALPN-01  (推荐，需放行 443 端口)"
-  echo "  3. DNS-01       (Cloudflare API)"
-  echo "  4. DNS-01       (阿里云 DNS API)"
-  echo "  5. DNS-01       (ACME-DNS API)"
+  echo "  1. HTTP         (推荐 需放行80端口)"
+  echo "  2. TLS-ALPN     (推荐 需放行443端口)"
+  echo "  3. Cloudflare API"
+  echo "  4. 阿里云 DNS API"
+  echo "  5. ACME-DNS API"
   while :; do
     case $(prompt "请选择方式" 1) in
       1) mode=http; break ;;
