@@ -373,7 +373,6 @@ deep_prune() {
     sync
 
     _info "孤立包检测..."
-    apt-mark minimize-manual >>"$LOG_FILE" 2>&1 || true
     apt-get autoremove --purge -y -q >>"$LOG_FILE" 2>&1 || true
     _ok "孤立包清理完成"
 
