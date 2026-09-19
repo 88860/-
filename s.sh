@@ -3104,7 +3104,7 @@ run_uninstall(){
   rm -rf "$SB_DIR" "$SBM_DIR" /var/lib/sing-box "$CORE" "$SHORTCUT"
   if [ ${#packages[@]} -gt 0 ]; then
     tell "脚本曾安装过: [ ${packages[*]} ]"
-    if prompt_yes "是否移除依赖组件 (仅执行 remove，不触碰系统核心包)"; then
+    if prompt_yes "是否移除依赖组件"; then
       apt-get remove -y -q "${packages[@]}" >/dev/null 2>&1
       apt-get autoremove -y -q >/dev/null 2>&1
     fi
