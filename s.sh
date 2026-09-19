@@ -2213,7 +2213,7 @@ wg_save(){
 wg_status(){
   local file=$WG_CONF role state ms color status
   clear
-  [ -f "$file" ] || { tell "模式：未配置 状态：未配置"; wait_key; return; }
+  [ -f "$file" ] || { tell "模式:未配置 状态:未配置"; wait_key; return; }
   role=$(jq -r '.role // ""' "$file")
   if [ "$(jq -r '.enabled//false' "$file")" = true ]; then
     status="已启动"
@@ -2225,14 +2225,14 @@ wg_status(){
     ms=${state#*|}
     if [[ "$state" == ok\|* ]] && [[ "$ms" =~ ^[0-9]+$ ]]; then
       if [ "$ms" -lt 100 ]; then color="$GREEN"; elif [ "$ms" -lt 150 ]; then color="$YELLOW"; else color="$BROWN"; fi
-      tell "模式：客户端 状态：${GREEN}已连接${PLAIN} 延迟：${color}${ms} ms${PLAIN}"
+      tell "模式:客户端 状态:${GREEN}已连接${PLAIN} 延迟:${color}${ms} ms${PLAIN}"
     else
-      tell "模式：客户端 状态：${GREEN}已启动${PLAIN} 延迟：${RED}超时${PLAIN}"
+      tell "模式:客户端 状态:${GREEN}已启动${PLAIN} 延迟:${RED}超时${PLAIN}"
     fi
   elif [ "$role" = server ]; then
-    tell "模式：服务端 状态：${GREEN}${status}${PLAIN}"
+    tell "模式:服务端 状态:${GREEN}${status}${PLAIN}"
   else
-    tell "模式：客户端 状态：${RED}${status}${PLAIN}"
+    tell "模式:客户端 状态:${RED}${status}${PLAIN}"
   fi
   wait_key
 }
