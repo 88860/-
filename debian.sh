@@ -4,58 +4,144 @@ export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
 
 if [ -t 1 ]; then
-    R=$'\033[38;5;203m'
-    O=$'\033[38;5;215m'
-    Y=$'\033[38;5;227m'
-    G=$'\033[38;5;120m'
-    C=$'\033[38;5;117m'
-    B=$'\033[38;5;111m'
-    P=$'\033[38;5;183m'
-    M=$'\033[38;5;218m'
-
-    BR=$'\033[1;38;5;203m'
-    BO=$'\033[1;38;5;215m'
-    BY=$'\033[1;38;5;227m'
-    BG=$'\033[1;38;5;120m'
-    BC=$'\033[1;38;5;117m'
-    BB=$'\033[1;38;5;111m'
-    BP=$'\033[1;38;5;183m'
-    BM=$'\033[1;38;5;218m'
-
-    DIM=$'\033[2m'
-    BLD=$'\033[1m'
-    RST=$'\033[0m'
-    INV=$'\033[7m'
+    R=$'\033[38;5;203m'; O=$'\033[38;5;215m'; Y=$'\033[38;5;227m'; G=$'\033[38;5;120m'
+    C=$'\033[38;5;117m'; B=$'\033[38;5;111m'; P=$'\033[38;5;183m'; M=$'\033[38;5;218m'
+    BR=$'\033[1;38;5;203m'; BO=$'\033[1;38;5;215m'; BY=$'\033[1;38;5;227m'; BG=$'\033[1;38;5;120m'
+    BC=$'\033[1;38;5;117m'; BB=$'\033[1;38;5;111m'; BP=$'\033[1;38;5;183m'; BM=$'\033[1;38;5;218m'
+    DIM=$'\033[2m'; BLD=$'\033[1m'; RST=$'\033[0m'; TTY=1
 else
     R=''; O=''; Y=''; G=''; C=''; B=''; P=''; M=''
     BR=''; BO=''; BY=''; BG=''; BC=''; BB=''; BP=''; BM=''
-    DIM=''; BLD=''; RST=''; INV=''
+    DIM=''; BLD=''; RST=''; TTY=0
 fi
 
 LOG_FILE="/var/log/debian-optimizer.log"
 : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
+
+_cursor_hide() { [ "$TTY" = 1 ] && printf '\033[?25l'; }
+_cursor_show() { [ "$TTY" = 1 ] && printf '\033[?25h'; }
+trap '_cursor_show' EXIT INT TERM
+
+_typewrite() {
+    local text="$1" delay="${2:-0.005}"
+    if [ "$TTY" = 0 ]; then echo "$text"; return; fi
+    local i
+    for ((i=0; i<${#text}; i++)); do
+        printf '%s' "${text:$i:1}"
+        sleep "$delay"
+    done
+    echo
+}
+
+_rainbow_flow() {
+    local width=58
+    if [ "$TTY" = 0 ]; then
+        printf '  '
+        for c in R O Y G C B P M; do printf '%s━' "${!c}"; done
+        printf '%s\n' "$RST"
+        return
+    fi
+    local cols=(R O Y G C B P M)
+    local f i
+    for ((f=0; f<8; f++)); do
+        printf '\r  '
+        for ((i=0; i<width; i++)); do
+            local c=${cols[(i+f)%8]}
+            printf '%s━' "${!c}"
+        done
+        printf '%s' "$RST"
+        sleep 0.025
+    done
+    echo
+}
+
+_pulse() {
+    local text="$1"
+    if [ "$TTY" = 0 ]; then echo "  ✔ $text"; echo "  ✔ $text" >> "$LOG_FILE"; return; fi
+    local cols=(G C B P M R)
+    local i
+    for ((i=0; i<6; i++)); do
+        printf '\r  %s✔%s %s' "${!cols[i]}" "$RST" "$text"
+        sleep 0.045
+    done
+    printf '\r  %s✔%s %s\n' "$BG" "$RST" "$text"
+    echo "  ✔ $text" >> "$LOG_FILE"
+}
 
 _info() { echo -e "  ${C}◆${RST} $*" | tee -a "$LOG_FILE"; }
 _ok()   { echo -e "  ${BG}✔${RST} $*" | tee -a "$LOG_FILE"; }
 _warn() { echo -e "  ${BY}▲${RST} $*" | tee -a "$LOG_FILE"; }
 _bad()  { echo -e "  ${BR}✘${RST} $*" | tee -a "$LOG_FILE"; }
 
-_rainbow_sep() {
-    local chars="━"
-    printf '  '
-    for c in R O Y G C B P M; do
-        printf '%s%s' "${!c}" "$chars"
+_run_spin() {
+    local msg="$1"; shift
+    if [ "$TTY" = 0 ]; then
+        if "$@" >> "$LOG_FILE" 2>&1; then echo "  ✔ $msg"; return 0
+        else echo "  ✘ $msg"; return 1; fi
+    fi
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local cols=(C B P M R O Y G)
+    "$@" >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf '\r  %s%s%s %s%s%s' "${!cols[i%8]}" "${frames[i%10]}" "$RST" "$DIM" "$msg" "$RST"
+        i=$((i+1))
+        sleep 0.06
     done
-    printf '%s\n' "$RST"
+    wait "$pid"
+    local rc=$?
+    if [ $rc -eq 0 ]; then
+        printf '\r  %s✔%s %s%s%s\n' "$BG" "$RST" "$BLD" "$msg" "$RST"
+        echo "  ✔ $msg" >> "$LOG_FILE"
+    else
+        printf '\r  %s✘%s %s%s%s\n' "$BR" "$RST" "$BLD" "$msg" "$RST"
+        echo "  ✘ $msg" >> "$LOG_FILE"
+    fi
+    return $rc
 }
 
 _step() {
     local tag="$1" color="$2"; shift 2
     echo
-    printf '%s  ┏━[%s%s%s%s]%s' "$DIM" "$RST" "$BLD" "$color" "$tag" "$RST"
-    printf '%s %s%s\n' "$DIM" "$*" "$RST"
-    printf '%s  ┗' "$DIM"
-    _rainbow_sep
+    printf '%s  ┏━[%s%s%s%s]%s ' "$DIM" "$RST" "$BLD" "$color" "$tag" "$RST"
+    _typewrite "$*" 0.005
+    printf '%s  ┗%s' "$DIM" "$RST"
+    _rainbow_flow
+}
+
+_banner() {
+    local L=(
+'  ╔══════════════════════════════════════════════════════════╗'
+'  ║                                                          ║'
+'  ║   █▀▄ █▀▀ █▀▄ ▀█▀ ▄▀█ █▄░█   ◆  A D V A N C E D  ◆      ║'
+'  ║   █▄▀ ██▄ █▄▀ ░█░ █▀█ █░▀█                               ║'
+'  ║                                                          ║'
+'  ║          D E B I A N   1 3   O P T I M I Z E R           ║'
+'  ║                                                          ║'
+'  ╚══════════════════════════════════════════════════════════╝'
+    )
+    local CC=("$BR" "$BO" "$BY" "$BG" "$BC" "$BB" "$BP" "$BM")
+    echo
+    local i
+    for i in "${!L[@]}"; do
+        printf '%s%s%s\n' "${CC[$i]}" "${L[$i]}" "$RST"
+        [ "$TTY" = 1 ] && sleep 0.05
+    done
+    echo
+}
+
+_finale() {
+    if [ "$TTY" = 0 ]; then echo "  ✔ 全部任务已完成"; return; fi
+    local cols=(R O Y G C B P M)
+    local i j
+    for ((j=0; j<3; j++)); do
+        for ((i=0; i<8; i++)); do
+            printf '\r  %s%s✔  全 部 任 务 已 完 成  %s' "${!cols[i]}" "$BLD" "$RST"
+            sleep 0.05
+        done
+    done
+    printf '\r  %s✔  全 部 任 务 已 完 成  %s  \n' "$BG$BLD" "$RST"
 }
 
 if [ "$EUID" -ne 0 ]; then
@@ -63,16 +149,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo
-echo -e "  ${BR}╔══════════════════════════════════════════════════════════╗${RST}"
-echo -e "  ${BO}║${RST}                                                          ${BO}║${RST}"
-echo -e "  ${BO}║${RST}   ${BR}█▀▄${BO} █▀▀${BY} █▀▄${BG} ▀█▀${BC} ▄▀█${BB} █▄░█${BP}${RST}   ${BM}◆${RST} ${BLD}ADVANCED${RST} ${BM}◆${RST}         ${BO}║${RST}"
-echo -e "  ${BO}║${RST}   ${BR}█▄▀${BO} ██▄${BY} █▄▀${BG} ░█░${BC} █▀█${BB} █░▀█${BP}${RST}                       ${BO}║${RST}"
-echo -e "  ${BO}║${RST}                                                          ${BO}║${RST}"
-echo -e "  ${BY}║${RST}              ${BM}D E B I A N${RST}  ${C}1 3${RST}  ${BG}O P T I M I Z E R${RST}                ${BY}║${RST}"
-echo -e "  ${BY}║${RST}                                                          ${BY}║${RST}"
-echo -e "  ${BG}╚══════════════════════════════════════════════════════════╝${RST}"
-echo
+_cursor_hide
+_banner
 
 _os_name="$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-未知}" )"
 
@@ -84,7 +162,7 @@ printf '  %s│%s  %s%s根盘%s  %s\n' "$DIM" "$RST" "$BM" "$BLD" "$RST" "$(df -
 printf '  %s│%s  %s%s日志%s  %s%s%s\n' "$DIM" "$RST" "$BB" "$BLD" "$RST" "$DIM" "$LOG_FILE" "$RST"
 printf '  %s└────────────────────────────────────────────────────────┘%s\n' "$DIM" "$RST"
 echo
-_rainbow_sep
+_rainbow_flow
 
 echo
 read -r -p "$(echo -e "  ${BY}${BLD}❯ 确认启动全自动优化与清理？${RST} ${DIM}[y/N]${RST} ")" CONFIRM
@@ -119,44 +197,46 @@ kernel_prune() {
     fi
 
     _info "将清理以下内核包:"
+    local p
     for p in "${cleanup[@]}"; do echo -e "      ${BR}✂${RST} ${DIM}${p}${RST}" | tee -a "$LOG_FILE"; done
 
-    if apt-get purge -y --no-install-recommends "${cleanup[@]}" >>"$LOG_FILE" 2>&1; then
-        _ok "内核与元包清理完成"
+    if _run_spin "正在卸载冗余内核..." apt-get purge -y --no-install-recommends "${cleanup[@]}"; then
+        _pulse "内核与元包清理完成"
     else
         _bad "部分内核清理失败"
     fi
-    command -v update-grub >/dev/null 2>&1 && update-grub >>"$LOG_FILE" 2>&1 && _ok "GRUB 已更新" || true
+    command -v update-grub >/dev/null 2>&1 && update-grub >> "$LOG_FILE" 2>&1 && _ok "GRUB 已更新" || true
 }
 
 sys_upgrade() {
     _step "2/6" "$BO" "精简组件并全局升级"
 
     _info "移除冗余组件..."
-    apt-get purge -y 'qemu*' os-prober laptop-detect pciutils dmidecode >>"$LOG_FILE" 2>&1 || true
-    apt-get autoremove --purge -y >>"$LOG_FILE" 2>&1 || true
+    apt-get purge -y 'qemu*' os-prober laptop-detect pciutils dmidecode >> "$LOG_FILE" 2>&1 || true
+    apt-get autoremove --purge -y >> "$LOG_FILE" 2>&1 || true
     _ok "组件精简完成"
 
     _info "清理 rc 残留包..."
     local rc_pkgs
     rc_pkgs="$(dpkg -l 2>/dev/null | awk '/^rc/ {print $2}')"
     if [ -n "$rc_pkgs" ]; then
-        echo "$rc_pkgs" | xargs apt-get purge -y -qq >>"$LOG_FILE" 2>&1 || true
+        echo "$rc_pkgs" | xargs apt-get purge -y -qq >> "$LOG_FILE" 2>&1 || true
         _ok "残留包已清理"
     else
         _ok "无残留包"
     fi
 
-    _info "刷新索引并执行 full-upgrade..."
-    apt-get update -qq >>"$LOG_FILE" 2>&1 || true
-    if apt-get full-upgrade -y -q >>"$LOG_FILE" 2>&1; then
-        _ok "全局升级完成"
+    _info "刷新软件索引..."
+    apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+
+    if _run_spin "执行 full-upgrade..." apt-get full-upgrade -y -q; then
+        _pulse "全局升级完成"
     else
         _warn "升级有非致命错误，详见日志"
     fi
 
-    apt-get autoremove --purge -y -qq >>"$LOG_FILE" 2>&1 || true
-    apt-get clean -qq >>"$LOG_FILE" 2>&1 || true
+    apt-get autoremove --purge -y -qq >> "$LOG_FILE" 2>&1 || true
+    apt-get clean -qq >> "$LOG_FILE" 2>&1 || true
     _ok "升级后清理完成"
 }
 
@@ -309,7 +389,7 @@ service_prune() {
     local svc
     for svc in "${services[@]}"; do
         if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
-            if systemctl disable --now "$svc" >>"$LOG_FILE" 2>&1; then
+            if systemctl disable --now "$svc" >> "$LOG_FILE" 2>&1; then
                 _ok "已禁用: ${DIM}${svc}${RST}"
             else
                 _warn "禁用失败: ${svc}"
@@ -320,10 +400,10 @@ service_prune() {
     if dpkg -l pcp 2>/dev/null | grep -q '^ii'; then
         _info "检测到 PCP，正在清理..."
         for svc in pmcd pmproxy pmlogger; do
-            systemctl disable --now "$svc" >>"$LOG_FILE" 2>&1 || true
+            systemctl disable --now "$svc" >> "$LOG_FILE" 2>&1 || true
         done
-        apt-get purge -y pcp pcp-conf >>"$LOG_FILE" 2>&1 || true
-        _ok "PCP 已禁用并清理"
+        _run_spin "卸载 PCP 组件..." apt-get purge -y pcp pcp-conf
+        _pulse "PCP 已禁用并清理"
     else
         _ok "未检测到 PCP"
     fi
@@ -359,8 +439,8 @@ EOF
     _ok "黑名单已写入 ${DIM}${bl_conf}${RST}"
 
     if command -v update-initramfs >/dev/null 2>&1; then
-        if update-initramfs -u >>"$LOG_FILE" 2>&1; then
-            _ok "initramfs 已更新"
+        if _run_spin "更新 initramfs..." update-initramfs -u; then
+            _pulse "initramfs 已更新"
         else
             _warn "initramfs 更新失败"
         fi
@@ -372,11 +452,9 @@ deep_prune() {
 
     sync
 
-    _info "孤立包检测..."
-    apt-get autoremove --purge -y -q >>"$LOG_FILE" 2>&1 || true
-    _ok "孤立包清理完成"
+    _run_spin "清理孤立包..." apt-get autoremove --purge -y -q
+    _pulse "孤立包清理完成"
 
-    _info "清理 APT 缓存..."
     rm -rf /var/cache/apt/archives/* 2>/dev/null || true
     _ok "APT 缓存已清理"
 
@@ -410,8 +488,8 @@ deep_prune() {
     rm -rf /var/log/journal/* 2>/dev/null || true
     systemctl restart systemd-journald >/dev/null 2>&1 || true
 
-    command -v docker >/dev/null 2>&1 && docker system prune -a -f --volumes >>"$LOG_FILE" 2>&1 && _ok "Docker 已清理" || true
-    command -v flatpak >/dev/null 2>&1 && flatpak uninstall --unused -y >>"$LOG_FILE" 2>&1 && _ok "Flatpak 已清理" || true
+    command -v docker >/dev/null 2>&1 && docker system prune -a -f --volumes >> "$LOG_FILE" 2>&1 && _ok "Docker 已清理" || true
+    command -v flatpak >/dev/null 2>&1 && flatpak uninstall --unused -y >> "$LOG_FILE" 2>&1 && _ok "Flatpak 已清理" || true
 
     sync
 }
@@ -424,13 +502,14 @@ module_blacklist
 deep_prune
 
 echo
-_rainbow_sep
+_rainbow_flow
 echo
-echo -e "  ${BG}${BLD}  ✔  全 部 任 务 已 完 成  ${RST}"
+_finale
 echo
 echo -e "  ${DIM}  日志:${RST} ${BB}${LOG_FILE}${RST}"
 echo
-_rainbow_sep
+_rainbow_flow
+_cursor_show
 echo
 
 read -r -p "$(echo -e "  ${BM}${BLD}❯ 按 ${BG}回车${BM}${BLD} 键重启系统，或 Ctrl+C 取消... ${RST}")" _ || true
