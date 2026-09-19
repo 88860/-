@@ -15,9 +15,6 @@ else
     DIM=''; BLD=''; RST=''; TTY=0
 fi
 
-LOG_FILE="/var/log/debian-optimizer.log"
-: > "$LOG_FILE" 2>/dev/null || LOG_FILE="/dev/null"
-
 _cursor_hide() { [ "$TTY" = 1 ] && printf '\033[?25l'; }
 _cursor_show() { [ "$TTY" = 1 ] && printf '\033[?25h'; }
 trap '_cursor_show' EXIT INT TERM
@@ -34,15 +31,13 @@ _typewrite() {
 }
 
 _rainbow_flow() {
-    local width=58
     if [ "$TTY" = 0 ]; then
         printf '  '
         for c in R O Y G C B P M; do printf '%s━' "${!c}"; done
         printf '%s\n' "$RST"
         return
     fi
-    local cols=(R O Y G C B P M)
-    local f i
+    local width=58 cols=(R O Y G C B P M) f i
     for ((f=0; f<8; f++)); do
         printf '\r  '
         for ((i=0; i<width; i++)); do
@@ -57,31 +52,29 @@ _rainbow_flow() {
 
 _pulse() {
     local text="$1"
-    if [ "$TTY" = 0 ]; then echo "  ✔ $text"; echo "  ✔ $text" >> "$LOG_FILE"; return; fi
-    local cols=(G C B P M R)
-    local i
+    if [ "$TTY" = 0 ]; then echo "  ✔ $text"; return; fi
+    local cols=(G C B P M R) i
     for ((i=0; i<6; i++)); do
         printf '\r  %s✔%s %s' "${!cols[i]}" "$RST" "$text"
         sleep 0.045
     done
     printf '\r  %s✔%s %s\n' "$BG" "$RST" "$text"
-    echo "  ✔ $text" >> "$LOG_FILE"
 }
 
-_info() { echo -e "  ${C}◆${RST} $*" | tee -a "$LOG_FILE"; }
-_ok()   { echo -e "  ${BG}✔${RST} $*" | tee -a "$LOG_FILE"; }
-_warn() { echo -e "  ${BY}▲${RST} $*" | tee -a "$LOG_FILE"; }
-_bad()  { echo -e "  ${BR}✘${RST} $*" | tee -a "$LOG_FILE"; }
+_info() { echo -e "  ${C}◆${RST} $*"; }
+_ok()   { echo -e "  ${BG}✔${RST} $*"; }
+_warn() { echo -e "  ${BY}▲${RST} $*"; }
+_bad()  { echo -e "  ${BR}✘${RST} $*"; }
 
 _run_spin() {
     local msg="$1"; shift
     if [ "$TTY" = 0 ]; then
-        if "$@" >> "$LOG_FILE" 2>&1; then echo "  ✔ $msg"; return 0
+        if "$@" >/dev/null 2>&1; then echo "  ✔ $msg"; return 0
         else echo "  ✘ $msg"; return 1; fi
     fi
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local cols=(C B P M R O Y G)
-    "$@" >> "$LOG_FILE" 2>&1 &
+    "$@" >/dev/null 2>&1 &
     local pid=$!
     local i=0
     while kill -0 "$pid" 2>/dev/null; do
@@ -93,10 +86,8 @@ _run_spin() {
     local rc=$?
     if [ $rc -eq 0 ]; then
         printf '\r  %s✔%s %s%s%s\n' "$BG" "$RST" "$BLD" "$msg" "$RST"
-        echo "  ✔ $msg" >> "$LOG_FILE"
     else
         printf '\r  %s✘%s %s%s%s\n' "$BR" "$RST" "$BLD" "$msg" "$RST"
-        echo "  ✘ $msg" >> "$LOG_FILE"
     fi
     return $rc
 }
@@ -133,8 +124,7 @@ _banner() {
 
 _finale() {
     if [ "$TTY" = 0 ]; then echo "  ✔ 全部任务已完成"; return; fi
-    local cols=(R O Y G C B P M)
-    local i j
+    local cols=(R O Y G C B P M) i j
     for ((j=0; j<3; j++)); do
         for ((i=0; i<8; i++)); do
             printf '\r  %s%s✔  全 部 任 务 已 完 成  %s' "${!cols[i]}" "$BLD" "$RST"
@@ -159,7 +149,6 @@ printf '  %s│%s  %s%s主机%s  %s\n' "$DIM" "$RST" "$BC" "$BLD" "$RST" "$(host
 printf '  %s│%s  %s%s系统%s  %s\n' "$DIM" "$RST" "$BG" "$BLD" "$RST" "$_os_name"
 printf '  %s│%s  %s%s内核%s  %s\n' "$DIM" "$RST" "$BY" "$BLD" "$RST" "$(uname -r)"
 printf '  %s│%s  %s%s根盘%s  %s\n' "$DIM" "$RST" "$BM" "$BLD" "$RST" "$(df -h / | awk 'NR==2 {print $2" 已用 "$3" ("$5")"}')"
-printf '  %s│%s  %s%s日志%s  %s%s%s\n' "$DIM" "$RST" "$BB" "$BLD" "$RST" "$DIM" "$LOG_FILE" "$RST"
 printf '  %s└────────────────────────────────────────────────────────┘%s\n' "$DIM" "$RST"
 echo
 _rainbow_flow
@@ -198,45 +187,45 @@ kernel_prune() {
 
     _info "将清理以下内核包:"
     local p
-    for p in "${cleanup[@]}"; do echo -e "      ${BR}✂${RST} ${DIM}${p}${RST}" | tee -a "$LOG_FILE"; done
+    for p in "${cleanup[@]}"; do echo -e "      ${BR}✂${RST} ${DIM}${p}${RST}"; done
 
     if _run_spin "正在卸载冗余内核..." apt-get purge -y --no-install-recommends "${cleanup[@]}"; then
         _pulse "内核与元包清理完成"
     else
         _bad "部分内核清理失败"
     fi
-    command -v update-grub >/dev/null 2>&1 && update-grub >> "$LOG_FILE" 2>&1 && _ok "GRUB 已更新" || true
+    command -v update-grub >/dev/null 2>&1 && update-grub >/dev/null 2>&1 && _ok "GRUB 已更新" || true
 }
 
 sys_upgrade() {
     _step "2/6" "$BO" "精简组件并全局升级"
 
     _info "移除冗余组件..."
-    apt-get purge -y 'qemu*' os-prober laptop-detect pciutils dmidecode >> "$LOG_FILE" 2>&1 || true
-    apt-get autoremove --purge -y >> "$LOG_FILE" 2>&1 || true
+    apt-get purge -y 'qemu*' os-prober laptop-detect pciutils dmidecode >/dev/null 2>&1 || true
+    apt-get autoremove --purge -y >/dev/null 2>&1 || true
     _ok "组件精简完成"
 
     _info "清理 rc 残留包..."
     local rc_pkgs
     rc_pkgs="$(dpkg -l 2>/dev/null | awk '/^rc/ {print $2}')"
     if [ -n "$rc_pkgs" ]; then
-        echo "$rc_pkgs" | xargs apt-get purge -y -qq >> "$LOG_FILE" 2>&1 || true
+        echo "$rc_pkgs" | xargs apt-get purge -y -qq >/dev/null 2>&1 || true
         _ok "残留包已清理"
     else
         _ok "无残留包"
     fi
 
     _info "刷新软件索引..."
-    apt-get update -qq >> "$LOG_FILE" 2>&1 || true
+    apt-get update -qq >/dev/null 2>&1 || true
 
     if _run_spin "执行 full-upgrade..." apt-get full-upgrade -y -q; then
         _pulse "全局升级完成"
     else
-        _warn "升级有非致命错误，详见日志"
+        _warn "升级有非致命错误"
     fi
 
-    apt-get autoremove --purge -y -qq >> "$LOG_FILE" 2>&1 || true
-    apt-get clean -qq >> "$LOG_FILE" 2>&1 || true
+    apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
+    apt-get clean -qq >/dev/null 2>&1 || true
     _ok "升级后清理完成"
 }
 
@@ -389,7 +378,7 @@ service_prune() {
     local svc
     for svc in "${services[@]}"; do
         if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1; then
-            if systemctl disable --now "$svc" >> "$LOG_FILE" 2>&1; then
+            if systemctl disable --now "$svc" >/dev/null 2>&1; then
                 _ok "已禁用: ${DIM}${svc}${RST}"
             else
                 _warn "禁用失败: ${svc}"
@@ -400,7 +389,7 @@ service_prune() {
     if dpkg -l pcp 2>/dev/null | grep -q '^ii'; then
         _info "检测到 PCP，正在清理..."
         for svc in pmcd pmproxy pmlogger; do
-            systemctl disable --now "$svc" >> "$LOG_FILE" 2>&1 || true
+            systemctl disable --now "$svc" >/dev/null 2>&1 || true
         done
         _run_spin "卸载 PCP 组件..." apt-get purge -y pcp pcp-conf
         _pulse "PCP 已禁用并清理"
@@ -488,8 +477,8 @@ deep_prune() {
     rm -rf /var/log/journal/* 2>/dev/null || true
     systemctl restart systemd-journald >/dev/null 2>&1 || true
 
-    command -v docker >/dev/null 2>&1 && docker system prune -a -f --volumes >> "$LOG_FILE" 2>&1 && _ok "Docker 已清理" || true
-    command -v flatpak >/dev/null 2>&1 && flatpak uninstall --unused -y >> "$LOG_FILE" 2>&1 && _ok "Flatpak 已清理" || true
+    command -v docker >/dev/null 2>&1 && docker system prune -a -f --volumes >/dev/null 2>&1 && _ok "Docker 已清理" || true
+    command -v flatpak >/dev/null 2>&1 && flatpak uninstall --unused -y >/dev/null 2>&1 && _ok "Flatpak 已清理" || true
 
     sync
 }
@@ -505,8 +494,6 @@ echo
 _rainbow_flow
 echo
 _finale
-echo
-echo -e "  ${DIM}  日志:${RST} ${BB}${LOG_FILE}${RST}"
 echo
 _rainbow_flow
 _cursor_show
