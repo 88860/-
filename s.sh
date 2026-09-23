@@ -4910,8 +4910,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 
   while :; do
     clear
-        ui_title "S 管理"
-    ui_title "SYSTEMD"
+    ui_title "S管理"
         menu_item 1 "服务端管理"
     menu_item 2 "客户端管理"
     menu_item 3 "WireGuard 管理"
