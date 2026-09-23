@@ -4274,8 +4274,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 
   while :; do
     clear
-    tell "${CYAN}✦ s 管理器${PLAIN}"
-    tell "${DIM}SYSTEMD · SING-BOX${PLAIN}"
+    tell "${CYAN}✦ S 管理${PLAIN}"
+    tell "${DIM}SYSTEMD${PLAIN}"
     tell "  1. 服务端管理"
     tell "  2. 客户端管理"
     tell "  3. WireGuard 管理"
