@@ -189,6 +189,17 @@ add_unique_item() {
     arr_ref+=("$val")
 }
 
+has_array_item() {
+    local arr_name="$1"
+    local needle="$2"
+    local -n ref_arr="$arr_name"
+    local item=""
+    for item in "${ref_arr[@]}"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
 atomic_replace_if_changed() {
     local src="$1"
     local dst="$2"
@@ -670,7 +681,6 @@ detect_network_and_push_status() {
 
     if pgrep -x dhcpcd >/dev/null 2>&1 || \
        { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-units --state=active --no-legend 'dhcpcd*' 2>/dev/null | grep -q .; } || \
-       compgen -G "/run/dhcpcd/*.lease" >/dev/null 2>&1 || \
        { [ "$has_ifup_dhcp" -eq 1 ] && is_pkg_installed dhcpcd-base && ! is_pkg_installed isc-dhcp-client; }; then
         add_unique_item NET_MANAGERS "dhcpcd"
         if [ -f /etc/dhcpcd.conf ]; then
@@ -683,11 +693,7 @@ detect_network_and_push_status() {
         fi
     fi
 
-    local has_dhc_lease=0 lf=""
-    for lf in /var/lib/dhcp/dhclient*.leases /var/lib/dhcp3/dhclient*.leases; do
-        [ -s "$lf" ] && { has_dhc_lease=1; break; }
-    done
-    if pgrep -x dhclient >/dev/null 2>&1 || [ "$has_dhc_lease" -eq 1 ] || \
+    if pgrep -x dhclient >/dev/null 2>&1 || \
        { [ "$has_ifup_dhcp" -eq 1 ] && is_pkg_installed isc-dhcp-client; }; then
         add_unique_item NET_MANAGERS "dhclient"
         if [ -f /etc/dhcp/dhclient.conf ]; then
@@ -718,33 +724,29 @@ detect_network_and_push_status() {
         done
     fi
 
-    if { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-networkd 2>/dev/null; } || \
-       compgen -G "/run/systemd/netif/leases/*" >/dev/null 2>&1 || \
-       compgen -G "/etc/systemd/network/*.network" >/dev/null 2>&1; then
+    if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-networkd 2>/dev/null; then
         add_unique_item NET_MANAGERS "networkd"
         local nf=""
         for nf in /etc/systemd/network/*.network /run/systemd/network/*.network; do
             [ -f "$nf" ] || continue
-            if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv4|ipv6|both)' "$nf" 2>/dev/null || \
-               grep -qE '^[[:space:]]*IPv6AcceptRA[[:space:]]*=[[:space:]]*(yes|true|1)' "$nf" 2>/dev/null; then
-                grep -qE '^[[:space:]]*UseDNS[[:space:]]*=[[:space:]]*(no|false|0)' "$nf" 2>/dev/null || add_unique_item DNS_PUSH_SOURCES "networkd"
-                if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv4|ipv6|both)' "$nf" 2>/dev/null; then
-                    grep -qE '^[[:space:]]*UseHostname[[:space:]]*=[[:space:]]*(no|false|0)' "$nf" 2>/dev/null || add_unique_item HOST_PUSH_SOURCES "networkd"
+            if grep -qiE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|1|ipv4|ipv6|both)' "$nf" 2>/dev/null || \
+               grep -qiE '^[[:space:]]*IPv6AcceptRA[[:space:]]*=[[:space:]]*(yes|true|1)' "$nf" 2>/dev/null; then
+                grep -qiE '^[[:space:]]*UseDNS[[:space:]]*=[[:space:]]*(no|false|0)' "$nf" 2>/dev/null || add_unique_item DNS_PUSH_SOURCES "networkd"
+                if grep -qiE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|1|ipv4|ipv6|both)' "$nf" 2>/dev/null; then
+                    grep -qiE '^[[:space:]]*UseHostname[[:space:]]*=[[:space:]]*(no|false|0)' "$nf" 2>/dev/null || add_unique_item HOST_PUSH_SOURCES "networkd"
                 fi
             fi
         done
-        local nl=""
-        for nl in /run/systemd/netif/leases/*; do
-            [ -f "$nl" ] || continue
-            grep -qE '^DNS=.+' "$nl" 2>/dev/null && add_unique_item DNS_PUSH_SOURCES "dhcp-lease"
-            grep -qE '^HOSTNAME=.+' "$nl" 2>/dev/null && add_unique_item HOST_PUSH_SOURCES "dhcp-lease"
-        done
     fi
 
-    if { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; } || \
-       { [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q 'systemd/resolve'; }; then
+    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q 'systemd/resolve'; then
         add_unique_item NET_MANAGERS "resolved"
         add_unique_item DNS_PUSH_SOURCES "systemd-resolved"
+    elif [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        add_unique_item NET_MANAGERS "resolved"
+        if grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.53([[:space:]]|$)' /etc/resolv.conf 2>/dev/null || [ ! -s /etc/resolv.conf ]; then
+            add_unique_item DNS_PUSH_SOURCES "systemd-resolved"
+        fi
     fi
 
     if pgrep -x rdnssd >/dev/null 2>&1 || { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet rdnssd 2>/dev/null; }; then
@@ -766,7 +768,8 @@ detect_network_and_push_status() {
         fi
     fi
 
-    if [ -f /etc/cloud/cloud.cfg ] && [ ! -f /etc/cloud/cloud-init.disabled ]; then
+    if command -v cloud-init >/dev/null 2>&1 && [ -f /etc/cloud/cloud.cfg ] && [ ! -f /etc/cloud/cloud-init.disabled ] && \
+       { [ "$HAS_SYSTEMD" -eq 0 ] || systemctl is-enabled cloud-init.service >/dev/null 2>&1 || systemctl is-enabled cloud-init-local.service >/dev/null 2>&1; }; then
         add_unique_item NET_MANAGERS "cloud-init"
         local ci_pres="" ci_dns=""
         ci_pres="$(get_cloudinit_effective_bool "preserve_hostname")"
@@ -779,14 +782,15 @@ detect_network_and_push_status() {
         fi
     fi
 
-    if [ -f /etc/waagent.conf ] && grep -qE '^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=[[:space:]]*y' /etc/waagent.conf 2>/dev/null; then
+    if [ -f /etc/waagent.conf ] && grep -qE '^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=[[:space:]]*y' /etc/waagent.conf 2>/dev/null && \
+       { [ "$HAS_SYSTEMD" -eq 0 ] || systemctl is-active --quiet walinuxagent 2>/dev/null || systemctl is-enabled walinuxagent >/dev/null 2>&1; }; then
         add_unique_item HOST_PUSH_SOURCES "waagent"
     fi
 
-    if [ -f /etc/resolv.conf ]; then
+    if [ -s /etc/resolv.conf ] && grep -qE '^[[:space:]]*nameserver[[:space:]]+[^[:space:]]+' /etc/resolv.conf 2>/dev/null; then
         if grep -qiE 'Generated by (dhcpcd|resolvconf|NetworkManager|systemd-resolved|cloud-init)' /etc/resolv.conf 2>/dev/null; then
             add_unique_item DNS_PUSH_SOURCES "resolv.conf标记"
-        elif grep -qE '^[[:space:]]*nameserver[[:space:]]+(127\.0\.0\.53|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.|183\.60\.83\.19)' /etc/resolv.conf 2>/dev/null; then
+        elif grep -qE '^[[:space:]]*nameserver[[:space:]]+(127\.0\.0\.53|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.|183\.60\.83\.19)([[:space:]]|$)' /etc/resolv.conf 2>/dev/null; then
             add_unique_item DNS_PUSH_SOURCES "内网/云DNS"
         fi
     else
@@ -951,12 +955,17 @@ print_detection_summary() {
 
 patch_dhcpcd_conf() {
     local file="${1:-/etc/dhcpcd.conf}"
+    local mode="${2:-both}"
     [ -f "$file" ] || return 1
+    local do_dns=0 do_host=0
+    { [ "$mode" = "both" ] || [ "$mode" = "dns" ]; } && do_dns=1
+    { [ "$mode" = "both" ] || [ "$mode" = "host" ]; } && do_host=1
+    [ "$do_dns" -eq 1 ] || [ "$do_host" -eq 1 ] || return 1
     local tmp_f=""
     ensure_tmp_work
     tmp_f="$(mktemp "${TMP_WORK}/dhcpcd.XXXXXX")"
 
-    awk '
+    awk -v do_dns="$do_dns" -v do_host="$do_host" '
         {
             raw = $0
             if (raw ~ /^[[:space:]]*nohook[[:space:]]+/) {
@@ -965,7 +974,9 @@ patch_dhcpcd_conf() {
                 n = split(line, toks, /,[[:space:]]*|[[:space:]]+/)
                 kept = ""
                 for (i = 1; i <= n; i++) {
-                    if (toks[i] == "" || toks[i] == "resolv.conf" || toks[i] == "hostname") continue
+                    if (toks[i] == "") continue
+                    if (do_dns == 1 && toks[i] == "resolv.conf") continue
+                    if (do_host == 1 && toks[i] == "hostname") continue
                     kept = (kept == "" ? toks[i] : kept ", " toks[i])
                 }
                 if (kept != "") print "nohook " kept
@@ -974,8 +985,8 @@ patch_dhcpcd_conf() {
             print raw
         }
         END {
-            print "nohook resolv.conf"
-            print "nohook hostname"
+            if (do_dns == 1) print "nohook resolv.conf"
+            if (do_host == 1) print "nohook hostname"
         }
     ' "$file" > "$tmp_f"
 
@@ -984,12 +995,17 @@ patch_dhcpcd_conf() {
 
 patch_dhclient_conf() {
     local file="${1:-/etc/dhcp/dhclient.conf}"
+    local mode="${2:-both}"
     [ -f "$file" ] || return 1
+    local do_dns=0 do_host=0
+    { [ "$mode" = "both" ] || [ "$mode" = "dns" ]; } && do_dns=1
+    { [ "$mode" = "both" ] || [ "$mode" = "host" ]; } && do_host=1
+    [ "$do_dns" -eq 1 ] || [ "$do_host" -eq 1 ] || return 1
     local tmp_f=""
     ensure_tmp_work
     tmp_f="$(mktemp "${TMP_WORK}/dhc.XXXXXX")"
 
-    awk '
+    awk -v do_dns="$do_dns" -v do_host="$do_host" '
         BEGIN { in_req = 0; req_buf = ""; indent = "" }
         function flush_req(    s, n, arr, i, tok, out) {
             s = req_buf
@@ -1000,9 +1016,10 @@ patch_dhclient_conf() {
             for (i = 1; i <= n; i++) {
                 tok = arr[i]
                 gsub(/^[[:space:]]+|[[:space:]]+$/, "", tok)
-                if (tok == "" || tok == "domain-name-servers" || tok == "domain-name" || \
-                    tok == "domain-search" || tok == "host-name" || \
-                    tok == "dhcp6.name-servers" || tok == "dhcp6.domain-search") continue
+                if (tok == "") continue
+                if (do_dns == 1 && (tok == "domain-name-servers" || tok == "domain-name" || \
+                    tok == "domain-search" || tok == "dhcp6.name-servers" || tok == "dhcp6.domain-search")) continue
+                if (do_host == 1 && tok == "host-name") continue
                 out = (out == "" ? tok : out ", " tok)
             }
             if (out != "") print indent "request " out ";"
@@ -1039,7 +1056,7 @@ patch_dhclient_conf() {
 
 patch_netplan_yaml() {
     local file="$1"
-    local mode="${2:-full}"
+    local mode="${2:-both}"
     [ -f "$file" ] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
     python3 -c 'import yaml' >/dev/null 2>&1 || return 1
@@ -1052,6 +1069,8 @@ import sys, yaml
 
 path, dns_csv, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 dns_addrs = [x for x in dns_csv.split(',') if x]
+do_dns = mode in ('both', 'full', 'dns_only')
+do_host = mode in ('both', 'full', 'host_only')
 
 with open(path, 'r', encoding='utf-8') as f:
     data = yaml.safe_load(f) or {}
@@ -1075,31 +1094,25 @@ for sec in ('ethernets', 'wifis'):
             continue
         if has4:
             ov = cfg.setdefault('dhcp4-overrides', {})
-            if ov.get('use-dns') is not False:
+            if do_dns and ov.get('use-dns') is not False:
                 ov['use-dns'] = False
                 changed = True
-            if mode == 'full' and ov.get('use-hostname') is not False:
+            if do_host and ov.get('use-hostname') is not False:
                 ov['use-hostname'] = False
                 changed = True
         if has6 or has_ra:
             ov6 = cfg.setdefault('dhcp6-overrides', {})
-            if ov6.get('use-dns') is not False:
+            if do_dns and ov6.get('use-dns') is not False:
                 ov6['use-dns'] = False
                 changed = True
-            if has6 and mode == 'full' and ov6.get('use-hostname') is not False:
+            if has6 and do_host and ov6.get('use-hostname') is not False:
                 ov6['use-hostname'] = False
                 changed = True
-        if has4 and has6:
-            ov4 = cfg.get('dhcp4-overrides', {})
-            ov6 = cfg.get('dhcp6-overrides', {})
-            for k, v in ov4.items():
-                if ov6.get(k) != v:
-                    ov6[k] = v
-                    changed = True
-        ns = cfg.setdefault('nameservers', {})
-        if ns.get('addresses') != dns_addrs:
-            ns['addresses'] = dns_addrs
-            changed = True
+        if do_dns:
+            ns = cfg.setdefault('nameservers', {})
+            if ns.get('addresses') != dns_addrs:
+                ns['addresses'] = dns_addrs
+                changed = True
 
 if not changed:
     sys.exit(2)
@@ -1114,16 +1127,27 @@ PYEOF
 
 patch_systemd_network_file() {
     local file="$1"
+    local mode="${2:-both}"
     [ -f "$file" ] || return 1
+    local -a kv4=() kv6=()
+    if [ "$mode" = "both" ] || [ "$mode" = "dns" ]; then
+        kv4+=("UseDNS=no")
+        kv6+=("UseDNS=no")
+    fi
+    if [ "$mode" = "both" ] || [ "$mode" = "host" ]; then
+        kv4+=("UseHostname=no")
+        kv6+=("UseHostname=no")
+    fi
     local changed=1
-    if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv4|both)' "$file" 2>/dev/null; then
-        upsert_ini_section "$file" "[DHCPv4]" "UseDNS=no" "UseHostname=no" && changed=0
+    if [ "${#kv4[@]}" -gt 0 ] && grep -qiE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|1|ipv4|both)' "$file" 2>/dev/null; then
+        upsert_ini_section "$file" "[DHCPv4]" "${kv4[@]}" && changed=0
     fi
-    if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv6|both)' "$file" 2>/dev/null; then
-        upsert_ini_section "$file" "[DHCPv6]" "UseDNS=no" "UseHostname=no" && changed=0
+    if [ "${#kv6[@]}" -gt 0 ] && grep -qiE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|1|ipv6|both)' "$file" 2>/dev/null; then
+        upsert_ini_section "$file" "[DHCPv6]" "${kv6[@]}" && changed=0
     fi
-    if grep -qE '^[[:space:]]*IPv6AcceptRA[[:space:]]*=[[:space:]]*(yes|true|1)' "$file" 2>/dev/null || \
-       grep -qE '^\[IPv6AcceptRA\]' "$file" 2>/dev/null; then
+    if { [ "$mode" = "both" ] || [ "$mode" = "dns" ]; } && \
+       { grep -qiE '^[[:space:]]*IPv6AcceptRA[[:space:]]*=[[:space:]]*(yes|true|1)' "$file" 2>/dev/null || \
+         grep -qE '^\[IPv6AcceptRA\]' "$file" 2>/dev/null; }; then
         upsert_ini_section "$file" "[IPv6AcceptRA]" "UseDNS=no" && changed=0
     fi
     return $changed
@@ -1131,30 +1155,36 @@ patch_systemd_network_file() {
 
 patch_cloud_cfg() {
     local file="${1:-/etc/cloud/cloud.cfg}"
+    local mode="${2:-both}"
     [ -f "$file" ] || return 1
+    local do_dns=0 do_host=0
+    { [ "$mode" = "both" ] || [ "$mode" = "dns" ]; } && do_dns=1
+    { [ "$mode" = "both" ] || [ "$mode" = "host" ]; } && do_host=1
+    [ "$do_dns" -eq 1 ] || [ "$do_host" -eq 1 ] || return 1
     local tmp_f=""
     ensure_tmp_work
     tmp_f="$(mktemp "${TMP_WORK}/cloud.XXXXXX")"
 
-    awk '
-        BEGIN { seen_p = 0; seen_d = 0 }
+    awk -v do_dns="$do_dns" -v do_host="$do_host" '
+        BEGIN { seen_p = 0 }
         /^[[:space:]]*preserve_hostname:[[:space:]]*/ {
-            if (!seen_p) {
-                print "preserve_hostname: true"
-                seen_p = 1
+            if (do_host == 1) {
+                if (!seen_p) {
+                    print "preserve_hostname: true"
+                    seen_p = 1
+                }
+                next
             }
-            next
         }
         /^[[:space:]]*manage_resolv_conf:[[:space:]]*/ {
-            if (!seen_d) {
+            if (do_dns == 1) {
                 print "manage_resolv_conf: false"
-                seen_d = 1
+                next
             }
-            next
         }
         { print }
         END {
-            if (!seen_p) print "preserve_hostname: true"
+            if (do_host == 1 && !seen_p) print "preserve_hostname: true"
         }
     ' "$file" > "$tmp_f"
 
@@ -1164,11 +1194,16 @@ patch_cloud_cfg() {
     local cf="" drop_rc=1
     for cf in /etc/cloud/cloud.cfg.d/*.cfg; do
         [ -f "$cf" ] || continue
-        if grep -qE '^[[:space:]]*(preserve_hostname|manage_resolv_conf):' "$cf" 2>/dev/null; then
+        if { [ "$do_host" -eq 1 ] && grep -qE '^[[:space:]]*preserve_hostname:' "$cf" 2>/dev/null; } || \
+           { [ "$do_dns" -eq 1 ] && grep -qE '^[[:space:]]*manage_resolv_conf:' "$cf" 2>/dev/null; }; then
             tmp_f="$(mktemp "${TMP_WORK}/cloudd.XXXXXX")"
-            awk '
-                /^[[:space:]]*preserve_hostname:[[:space:]]*/ { print "preserve_hostname: true"; next }
-                /^[[:space:]]*manage_resolv_conf:[[:space:]]*/ { print "manage_resolv_conf: false"; next }
+            awk -v do_dns="$do_dns" -v do_host="$do_host" '
+                /^[[:space:]]*preserve_hostname:[[:space:]]*/ {
+                    if (do_host == 1) { print "preserve_hostname: true"; next }
+                }
+                /^[[:space:]]*manage_resolv_conf:[[:space:]]*/ {
+                    if (do_dns == 1) { print "manage_resolv_conf: false"; next }
+                }
                 { print }
             ' "$cf" > "$tmp_f"
             if atomic_replace_if_changed "$tmp_f" "$cf" 0644; then
@@ -1247,82 +1282,77 @@ write_static_resolv_conf() {
     return 0
 }
 
+resolve_push_mode() {
+    local src="$1"
+    local d=0 h=0
+    has_array_item DNS_PUSH_SOURCES "$src" && d=1
+    has_array_item HOST_PUSH_SOURCES "$src" && h=1
+    if [ "$d" -eq 1 ] && [ "$h" -eq 1 ]; then
+        printf 'both'
+    elif [ "$d" -eq 1 ]; then
+        printf 'dns'
+    elif [ "$h" -eq 1 ]; then
+        printf 'host'
+    fi
+}
+
 step_dns_and_anti_dhcp() {
     step_title "1/7" "检测并锁定 DNS 与主机名"
 
-    ensure_tmp_work
-    local net_bak_dir="${TMP_WORK}/net_bak"
-    mkdir -p "$net_bak_dir"
+    local has_dns_push=0 has_host_push=0
+    [ "${#DNS_PUSH_SOURCES[@]}" -gt 0 ] && has_dns_push=1
+    [ "${#HOST_PUSH_SOURCES[@]}" -gt 0 ] && has_host_push=1
 
-    local resolv_bak="${net_bak_dir}/resolv.conf.bak"
-    local resolv_link=""
-    if [ -L /etc/resolv.conf ]; then
-        resolv_link="$(readlink /etc/resolv.conf 2>/dev/null || true)"
-    fi
-    if [ -e /etc/resolv.conf ]; then
-        cp -L /etc/resolv.conf "$resolv_bak" 2>/dev/null || true
+    ensure_hosts_entry
+
+    if [ "$has_dns_push" -eq 0 ] && [ "$has_host_push" -eq 0 ]; then
+        ok "未检测到 DNS 或主机名下发，保持现有静态配置不变"
+        return 0
     fi
 
-    local had_default_route=0
-    if ip -4 route show default 2>/dev/null | grep -q . || ip -6 route show default 2>/dev/null | grep -q .; then
-        had_default_route=1
-    fi
-
-    local netplan_changed=0
-    local networkd_changed=0
-    local resolved_was_active=0
-
-    if [ -f /etc/dhcpcd.conf ]; then
-        cp -p /etc/dhcpcd.conf "${net_bak_dir}/dhcpcd.conf.bak" 2>/dev/null || true
-        if patch_dhcpcd_conf /etc/dhcpcd.conf; then
-            ok "dhcpcd 已阻止下发 DNS 与主机名"
+    local m=""
+    m="$(resolve_push_mode "dhcpcd")"
+    if [ -n "$m" ] && [ -f /etc/dhcpcd.conf ]; then
+        if patch_dhcpcd_conf /etc/dhcpcd.conf "$m"; then
+            ok "dhcpcd 已阻止下发 (${m})"
         fi
     fi
 
-    if [ -f /etc/dhcp/dhclient.conf ]; then
-        cp -p /etc/dhcp/dhclient.conf "${net_bak_dir}/dhclient.conf.bak" 2>/dev/null || true
-        if patch_dhclient_conf /etc/dhcp/dhclient.conf; then
-            ok "dhclient 已移除 DNS 与主机名请求"
+    m="$(resolve_push_mode "dhclient")"
+    if [ -n "$m" ] && [ -f /etc/dhcp/dhclient.conf ]; then
+        if patch_dhclient_conf /etc/dhcp/dhclient.conf "$m"; then
+            ok "dhclient 已移除动态请求 (${m})"
         fi
     fi
 
-    if [ "$NETPLAN_ACTIVE" -eq 1 ]; then
-        mkdir -p "${net_bak_dir}/netplan"
-        local yf="" yname=""
+    m="$(resolve_push_mode "netplan")"
+    if [ -n "$m" ] && [ "$NETPLAN_ACTIVE" -eq 1 ]; then
+        local np_mode="both"
+        [ "$m" = "dns" ] && np_mode="dns_only"
+        [ "$m" = "host" ] && np_mode="host_only"
+        local yf="" yname="" netplan_changed=0
         for yf in /etc/netplan/*.yaml; do
             [ -f "$yf" ] || continue
             yname="$(basename "$yf")"
-            cp -p "$yf" "${net_bak_dir}/netplan/${yname}" 2>/dev/null || true
-            if patch_netplan_yaml "$yf" "full"; then
-                if command -v netplan >/dev/null 2>&1 && ! netplan generate >/dev/null 2>&1; then
-                    cp -p "${net_bak_dir}/netplan/${yname}" "$yf" 2>/dev/null || true
-                    if patch_netplan_yaml "$yf" "dns_only" && netplan generate >/dev/null 2>&1; then
-                        netplan_changed=1
-                        ok "Netplan 已锁定 DNS (${yname})"
-                    else
-                        cp -p "${net_bak_dir}/netplan/${yname}" "$yf" 2>/dev/null || true
-                        warn "Netplan 校验未通过，跳过修改 ${yname}"
-                    fi
-                else
-                    netplan_changed=1
-                    ok "Netplan 已锁定 DNS 与主机名 (${yname})"
-                fi
+            if patch_netplan_yaml "$yf" "$np_mode"; then
+                netplan_changed=1
+                ok "Netplan 已锁定策略 (${yname})"
             fi
         done
         if [ "$netplan_changed" -eq 1 ] && [ "$IS_CONTAINER" -eq 0 ] && command -v netplan >/dev/null 2>&1; then
+            netplan generate >/dev/null 2>&1 || true
             netplan apply >/dev/null 2>&1 || true
             wait_default_route_ready || true
         fi
     fi
 
-    if compgen -G "/etc/systemd/network/*.network" >/dev/null 2>&1; then
-        mkdir -p "${net_bak_dir}/network"
-        local nf="" nname=""
+    m="$(resolve_push_mode "networkd")"
+    if [ -n "$m" ] && compgen -G "/etc/systemd/network/*.network" >/dev/null 2>&1; then
+        local nf="" nname="" networkd_changed=0
         for nf in /etc/systemd/network/*.network; do
             [ -f "$nf" ] || continue
             nname="$(basename "$nf")"
-            cp -p "$nf" "${net_bak_dir}/network/${nname}" 2>/dev/null || true
-            if patch_systemd_network_file "$nf"; then
+            if patch_systemd_network_file "$nf" "$m"; then
                 ok "networkd 已阻止下发 (${nname})"
                 networkd_changed=1
             fi
@@ -1333,94 +1363,59 @@ step_dns_and_anti_dhcp() {
         fi
     fi
 
-    if [ -f /etc/cloud/cloud.cfg ]; then
-        if patch_cloud_cfg /etc/cloud/cloud.cfg; then
-            ok "cloud-init 已锁定 preserve_hostname"
+    m="$(resolve_push_mode "cloud-init")"
+    if [ -n "$m" ] && [ -f /etc/cloud/cloud.cfg ]; then
+        if patch_cloud_cfg /etc/cloud/cloud.cfg "$m"; then
+            ok "cloud-init 已锁定主机名与解析策略"
         fi
     fi
 
-    if [ -f /etc/waagent.conf ] && grep -qE '^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=[[:space:]]*y' /etc/waagent.conf 2>/dev/null; then
+    if has_array_item HOST_PUSH_SOURCES "waagent" && [ -f /etc/waagent.conf ]; then
         sed -i -E 's/^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=.*/Provisioning.MonitorHostName=n/' /etc/waagent.conf
         ok "waagent 已关闭主机名覆写"
     fi
 
-    if [ "$RDNSSD_ACTIVE" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
-        systemctl disable --now rdnssd >/dev/null 2>&1 || true
-        ok "已停用 rdnssd (IPv6 RA DNS)"
-    fi
-
-    if [ "$RESOLVCONF_ACTIVE" -eq 1 ] && command -v resolvconf >/dev/null 2>&1; then
-        resolvconf --disable-updates >/dev/null 2>&1 || true
-        ok "已停止 resolvconf 自动覆盖"
-    fi
-
-    if [ "$NM_ACTIVE" -eq 1 ] && [ -f /etc/NetworkManager/NetworkManager.conf ]; then
-        if upsert_ini_section /etc/NetworkManager/NetworkManager.conf "[main]" "dns=none"; then
-            systemctl reload NetworkManager >/dev/null 2>&1 || true
-            ok "NetworkManager 已禁用写 resolv.conf"
+    if [ "$has_dns_push" -eq 1 ]; then
+        if [ "$RDNSSD_ACTIVE" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl disable --now rdnssd >/dev/null 2>&1 || true
+            ok "已停用 rdnssd (IPv6 RA DNS)"
         fi
-    fi
 
-    if [ -f /etc/systemd/resolved.conf ]; then
-        local r_dns=""
-        r_dns="${DNS_ORDER[*]}"
-        upsert_ini_section /etc/systemd/resolved.conf "[Resolve]" "DNS=${r_dns}" "FallbackDNS=" "MulticastDNS=no" >/dev/null 2>&1 || true
-    fi
-
-    if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        resolved_was_active=1
-        systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
-        ok "已停用 systemd-resolved stub"
-    fi
-
-    ensure_hosts_entry
-
-    local resolv_written=0
-    if write_static_resolv_conf; then
-        resolv_written=1
-    fi
-
-    local net_ok=1
-    if [ "$had_default_route" -eq 1 ] && ! wait_default_route_ready; then
-        net_ok=0
-    fi
-    if [ "$net_ok" -eq 1 ] && ! test_dns_resolution; then
-        net_ok=0
-    fi
-
-    if [ "$net_ok" -eq 0 ]; then
-        warn "检测到网络或解析异常，正在自动回滚网络配置"
-        if [ -f "${net_bak_dir}/dhcpcd.conf.bak" ]; then
-            cp -p "${net_bak_dir}/dhcpcd.conf.bak" /etc/dhcpcd.conf 2>/dev/null || true
+        if [ "$RESOLVCONF_ACTIVE" -eq 1 ] && command -v resolvconf >/dev/null 2>&1; then
+            resolvconf --disable-updates >/dev/null 2>&1 || true
+            ok "已停止 resolvconf 自动覆盖"
         fi
-        if [ -f "${net_bak_dir}/dhclient.conf.bak" ]; then
-            cp -p "${net_bak_dir}/dhclient.conf.bak" /etc/dhcp/dhclient.conf 2>/dev/null || true
-        fi
-        if [ -d "${net_bak_dir}/netplan" ]; then
-            cp -p "${net_bak_dir}/netplan/"*.yaml /etc/netplan/ 2>/dev/null || true
-            if [ "$netplan_changed" -eq 1 ] && [ "$IS_CONTAINER" -eq 0 ] && command -v netplan >/dev/null 2>&1; then
-                netplan apply >/dev/null 2>&1 || true
+
+        if [ "$NM_ACTIVE" -eq 1 ] && [ -f /etc/NetworkManager/NetworkManager.conf ]; then
+            if upsert_ini_section /etc/NetworkManager/NetworkManager.conf "[main]" "dns=none"; then
+                systemctl reload NetworkManager >/dev/null 2>&1 || true
+                ok "NetworkManager 已禁用写 resolv.conf"
             fi
         fi
-        if [ -d "${net_bak_dir}/network" ]; then
-            cp -p "${net_bak_dir}/network/"*.network /etc/systemd/network/ 2>/dev/null || true
-            if [ "$networkd_changed" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
-                systemctl reload systemd-networkd >/dev/null 2>&1 || true
+
+        if has_array_item DNS_PUSH_SOURCES "systemd-resolved"; then
+            if [ -f /etc/systemd/resolved.conf ]; then
+                local r_dns=""
+                r_dns="${DNS_ORDER[*]}"
+                upsert_ini_section /etc/systemd/resolved.conf "[Resolve]" "DNS=${r_dns}" "FallbackDNS=" "MulticastDNS=no" >/dev/null 2>&1 || true
+            fi
+            if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+                systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
+                ok "已停用 systemd-resolved stub"
             fi
         fi
-        rm -f /etc/resolv.conf 2>/dev/null || true
-        if [ -n "$resolv_link" ]; then
-            ln -sf "$resolv_link" /etc/resolv.conf 2>/dev/null || true
-        elif [ -e "$resolv_bak" ]; then
-            cp -p "$resolv_bak" /etc/resolv.conf 2>/dev/null || true
+
+        if write_static_resolv_conf; then
+            if test_dns_resolution; then
+                ok "静态 DNS 已写入并验证可用 (${DNS_ORDER[*]})"
+            else
+                warn "静态 DNS 已写入，当前暂未通过在线解析验证"
+            fi
+        else
+            ok "静态 DNS 文件已处于目标状态"
         fi
-        if [ "$resolved_was_active" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
-            systemctl enable --now systemd-resolved >/dev/null 2>&1 || true
-        fi
-    elif [ "$resolv_written" -eq 1 ]; then
-        ok "静态 DNS 已写入并验证可用"
     else
-        ok "DNS 与防下发策略均已就绪"
+        ok "未检测到 DNS 下发，保持现有 /etc/resolv.conf 不变"
     fi
 }
 
@@ -1758,12 +1753,15 @@ step_pkg_prune_and_upgrade() {
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" || true
 
-    if [ -L /etc/resolv.conf ] || { [ -f /etc/resolv.conf ] && ! grep -qF "${DNS_ORDER[0]}" /etc/resolv.conf 2>/dev/null; }; then
-        if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-            systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
-        fi
-        if write_static_resolv_conf && test_dns_resolution; then
-            ok "升级后已复核锁定静态 DNS"
+    if [ "${#DNS_PUSH_SOURCES[@]}" -gt 0 ] || [ ! -s /etc/resolv.conf ] || \
+       { [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -qE 'systemd/resolve|resolvconf'; }; then
+        if [ -L /etc/resolv.conf ] || [ ! -s /etc/resolv.conf ] || { [ -f /etc/resolv.conf ] && ! grep -qF "${DNS_ORDER[0]}" /etc/resolv.conf 2>/dev/null; }; then
+            if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+                systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
+            fi
+            if write_static_resolv_conf; then
+                ok "升级后已复核锁定静态 DNS"
+            fi
         fi
     fi
 
@@ -2086,25 +2084,17 @@ patch_logrotate_rsyslog() {
 patch_sshd_config() {
     local ssh_conf="/etc/ssh/sshd_config"
     [ -f "$ssh_conf" ] || return 0
-    ensure_tmp_work
-    local ssh_bak="${TMP_WORK}/sshd_config.bak"
-    cp -p "$ssh_conf" "$ssh_bak" 2>/dev/null || true
     local ssh_body=$'UseDNS no\nGSSAPIAuthentication no\nClientAliveInterval 60\nClientAliveCountMax 3'
     if upsert_block_file "$ssh_conf" "# >>> sys-opt-ssh >>>" "# <<< sys-opt-ssh <<<" "$ssh_body" '^[[:space:]]*Include[[:space:]]+'; then
         [ -d /run/sshd ] || mkdir -p /run/sshd 2>/dev/null || true
-        if command -v sshd >/dev/null 2>&1; then
-            if sshd -t >/dev/null 2>&1; then
-                if [ "$HAS_SYSTEMD" -eq 1 ]; then
-                    systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
-                fi
-                ok "SSH 已更新防超时/免反查并重载"
-            else
-                cp -p "$ssh_bak" "$ssh_conf" 2>/dev/null || true
-                warn "sshd -t 校验未通过，已还原原 SSH 配置"
-            fi
-        else
-            ok "SSH 已更新防超时/免反查"
+        if command -v sshd >/dev/null 2>&1 && [ -d /run/sshd ] && ! sshd -t >/dev/null 2>&1; then
+            warn "sshd -t 检查未通过，未重载 SSH，请检查 ${ssh_conf}"
+            return 0
         fi
+        if [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
+        fi
+        ok "SSH 已更新防超时/免反查并重载"
     else
         ok "SSH 配置已就绪"
     fi
