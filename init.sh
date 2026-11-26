@@ -13,6 +13,7 @@ HAS_IPV6=0
 HAS_ZRAM=0
 MEM_MB=0
 SWAP_MB=0
+VIRT_TYPE=""
 VIRT_LABEL="物理机/VM"
 SYSCTL_TARGET=""
 MODULES_TARGET=""
@@ -502,13 +503,19 @@ disable_unit_if_exists() {
     return 1
 }
 
+is_multipath_in_use() {
+    findmnt -no SOURCE / 2>/dev/null | grep -qiE 'mpath|dm-.*multipath' && return 0
+    compgen -G "/dev/mapper/mpath*" >/dev/null 2>&1 && return 0
+    return 1
+}
+
 detect_sysctl_target() {
-    if [ -L /etc/sysctl.d/99-sysctl.conf ] || [ -f /etc/sysctl.conf ]; then
+    if [ -L /etc/sysctl.d/99-sysctl.conf ] && [ -f /etc/sysctl.conf ]; then
         local major="${OS_VER_ID%%.*}"
         if [ "$OS_ID" = "debian" ] && [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -le 12 ]; then
             SYSCTL_TARGET="/etc/sysctl.conf"
             return 0
-        elif [ "$OS_ID" = "ubuntu" ] && [ -f /etc/sysctl.conf ]; then
+        elif [ "$OS_ID" = "ubuntu" ]; then
             if dpkg --compare-versions "${OS_VER_ID:-0}" le "24.04" 2>/dev/null; then
                 SYSCTL_TARGET="/etc/sysctl.conf"
                 return 0
@@ -869,8 +876,11 @@ detect_system_info() {
         if [ -f /.dockerenv ] || grep -qa 'container=' /proc/1/environ 2>/dev/null; then
             IS_CONTAINER=1
             [ -z "$virt" ] && virt="container"
+        elif { [ -z "$virt" ] || [ "$virt" = "none" ]; } && grep -qi 'microsoft' /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name 2>/dev/null; then
+            virt="microsoft"
         fi
     fi
+    VIRT_TYPE="$virt"
     if [ "$IS_CONTAINER" -eq 1 ]; then
         VIRT_LABEL="容器 (${virt:-container})"
     elif [ -n "$virt" ] && [ "$virt" != "none" ]; then
@@ -1441,14 +1451,20 @@ step_apt_dpkg_slimming() {
 
 pin_critical_packages() {
     local -a critical_pkgs=(
-        openssh-server openssh-client netplan.io netplan-generator ifupdown
+        openssh-server openssh-client netplan.io netplan-generator networkd-dispatcher ifupdown ifupdown2
         dhcpcd-base dhcpcd5 isc-dhcp-client isc-dhcp-common
         systemd-resolved resolvconf openresolv
         iproute2 iputils-ping netbase nftables iptables ethtool
         ca-certificates curl wget gnupg sudo udev systemd kmod
         initramfs-tools cloud-init python3-yaml linux-base linux-sysctl-defaults
-        efibootmgr amazon-ec2-net-utils google-guest-agent walinuxagent
+        efibootmgr open-iscsi amazon-ec2-net-utils google-guest-agent walinuxagent
     )
+    if [ "$VIRT_TYPE" = "microsoft" ]; then
+        critical_pkgs+=(hyperv-daemons)
+    fi
+    if [ "$NM_ACTIVE" -eq 1 ]; then
+        critical_pkgs+=(network-manager)
+    fi
     local -a to_pin=()
     local p=""
     for p in "${critical_pkgs[@]}"; do
@@ -1458,7 +1474,7 @@ pin_critical_packages() {
     done
     while IFS= read -r p; do
         [ -n "$p" ] && to_pin+=("$p")
-    done < <(dpkg-query -W -f='${Status}\t${Package}\n' 'grub*' 'linux-firmware*' 'libnetplan*' 2>/dev/null | awk -F'\t' '$1=="install ok installed"{print $2}' || true)
+    done < <(dpkg-query -W -f='${Status}\t${Package}\n' 'grub*' 'shim*' 'linux-firmware*' 'libnetplan*' 2>/dev/null | awk -F'\t' '$1=="install ok installed"{print $2}' || true)
 
     if [ "${#to_pin[@]}" -gt 0 ]; then
         apt-mark manual "${to_pin[@]}" >/dev/null 2>&1 || true
@@ -1472,7 +1488,10 @@ filter_safe_purge_pkgs() {
     local -n out_ref="$out_arr_name"
     out_ref=()
 
-    local protected_rx='^(openssh-server|openssh-client|netplan\.io|netplan-generator|libnetplan.*|ifupdown|dhcpcd-base|dhcpcd5|isc-dhcp-client|isc-dhcp-common|systemd-resolved|iproute2|iputils-ping|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs-tools|cloud-init|grub.*|efibootmgr|amazon-ec2-net-utils|google-guest-agent|walinuxagent)$'
+    local extra_prot=""
+    [ "$VIRT_TYPE" = "microsoft" ] && extra_prot="${extra_prot}|hyperv-daemons"
+    [ "$NM_ACTIVE" -eq 1 ] && extra_prot="${extra_prot}|network-manager"
+    local protected_rx="^(openssh-server|openssh-client|netplan\\.io|netplan-generator|networkd-dispatcher|libnetplan.*|ifupdown|ifupdown2|dhcpcd-base|dhcpcd5|isc-dhcp-client|isc-dhcp-common|systemd-resolved|iproute2|iputils-ping|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs-tools|cloud-init|python3-yaml|open-iscsi|grub.*|shim.*|efibootmgr|amazon-ec2-net-utils|google-guest-agent|walinuxagent|linux-image-.*|linux-headers-.*|linux-modules-.*${extra_prot})\$"
     local p="" sim_out=""
     for p in "${raw_pkgs[@]}"; do
         [ -z "$p" ] && continue
@@ -1493,7 +1512,7 @@ strip_cron_pattern() {
     local pat="$1"
     local f="" tmp_f=""
     ensure_tmp_work
-    for f in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/*; do
+    for f in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/* /etc/rc.local; do
         [ -f "$f" ] || continue
         if grep -qE "$pat" "$f" 2>/dev/null; then
             tmp_f="$(mktemp "${TMP_WORK}/cron.XXXXXX")"
@@ -1506,75 +1525,101 @@ strip_cron_pattern() {
 step_provider_agent_prune() {
     local found=0
 
-    if [ -f /etc/init.d/aegis ] || [ -d /usr/local/aegis ] || [ -d /usr/local/cloudmonitor ] || \
-       [ -d /usr/local/share/aliyun-assist ] || is_pkg_installed aliyun-assist || is_pkg_installed aliyun_assist; then
+    if [ -f /etc/init.d/aegis ] || compgen -G "/usr/local/aegis*" >/dev/null 2>&1 || [ -d /usr/local/cloudmonitor ] || \
+       [ -d /usr/local/share/aliyun-assist ] || [ -d /usr/local/share/assist-daemon ] || \
+       is_pkg_installed aliyun-assist || is_pkg_installed aliyun_assist || is_pkg_installed ecs-assist; then
         found=1
+        if [ -x /usr/local/share/assist-daemon/assist_daemon ]; then
+            /usr/local/share/assist-daemon/assist_daemon --stop >/dev/null 2>&1 || true
+        fi
+        if [ -x /usr/local/cloudmonitor/cloudmonitorCtl.sh ]; then
+            /usr/local/cloudmonitor/cloudmonitorCtl.sh stop >/dev/null 2>&1 || true
+            /usr/local/cloudmonitor/cloudmonitorCtl.sh remove >/dev/null 2>&1 || true
+        elif [ -x /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh ]; then
+            /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh stop >/dev/null 2>&1 || true
+            /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh remove >/dev/null 2>&1 || true
+        fi
         if [ "$HAS_SYSTEMD" -eq 1 ]; then
-            systemctl disable --now aliyun.service CmsGoAgent.service aegis.service cloudmonitor.service >/dev/null 2>&1 || true
+            systemctl disable --now aliyun.service assist-daemon.service CmsGoAgent.service aegis.service cloudmonitor.service argusagent.service >/dev/null 2>&1 || true
         fi
         if [ -x /etc/init.d/aegis ]; then
             /etc/init.d/aegis stop >/dev/null 2>&1 || true
             /etc/init.d/aegis uninstall >/dev/null 2>&1 || true
         fi
-        pkill -9 -f 'AliYunDun|AliHids|aliyun-service|CmsGoAgent|cloudmonitor' >/dev/null 2>&1 || true
-        rm -rf /usr/local/aegis /usr/local/cloudmonitor /usr/local/share/aliyun-assist \
+        pkill -9 -f 'AliYunDun|AliHids|aegis_quartz|aliyun-service|assist_daemon|CmsGoAgent|cloudmonitor|argusagent' >/dev/null 2>&1 || true
+        rm -rf /usr/local/aegis* /usr/local/cloudmonitor /usr/local/share/aliyun-assist /usr/local/share/assist-daemon \
                /usr/sbin/aliyun_installer /usr/sbin/aliyun-service \
-               /etc/systemd/system/aliyun.service /etc/systemd/system/CmsGoAgent.service \
-               /etc/systemd/system/cloudmonitor.service /etc/init.d/aegis 2>/dev/null || true
-        strip_cron_pattern 'aegis|aliyun|cloudmonitor'
-        ok "已清理阿里云监控/助手服务"
+               /etc/systemd/system/aliyun.service /etc/systemd/system/assist-daemon.service \
+               /etc/systemd/system/CmsGoAgent.service /etc/systemd/system/cloudmonitor.service /etc/systemd/system/argusagent.service \
+               /etc/init.d/aegis /var/log/aegis* 2>/dev/null || true
+        strip_cron_pattern 'aegis|aliyun|cloudmonitor|assist_daemon|argusagent'
+        ok "已清理阿里云监控/云助手服务"
     fi
 
-    if [ -d /usr/local/qcloud ] || [ -f /etc/cron.d/sgagenttask ] || \
-       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-unit-files 'tat_agent*' --no-legend 2>/dev/null | grep -q .; }; then
+    if [ -d /usr/local/qcloud ] || [ -d /usr/local/tat ] || [ -d /usr/local/ta ] || [ -d /usr/local/sa ] || [ -d /usr/local/agenttools ] || \
+       [ -f /etc/cron.d/sgagenttask ] || is_pkg_installed tat-agent || is_pkg_installed tat_agent || \
+       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-unit-files 'tat_agent*' 'YD*' --no-legend 2>/dev/null | grep -q .; }; then
         found=1
         local sh_u=""
         for sh_u in /usr/local/qcloud/stargate/admin/uninstall.sh \
                     /usr/local/qcloud/YunJing/uninst.sh \
-                    /usr/local/qcloud/monitor/barad/admin/uninstall.sh; do
+                    /usr/local/qcloud/monitor/barad/admin/uninstall.sh \
+                    /usr/local/qcloud/tat_agent/uninstall.sh; do
             if [ -x "$sh_u" ]; then
                 bash "$sh_u" >/dev/null 2>&1 || true
             fi
         done
         if [ "$HAS_SYSTEMD" -eq 1 ]; then
-            systemctl disable --now tat_agent.service tat_agent_service.service stargate.service barad_agent.service >/dev/null 2>&1 || true
+            systemctl disable --now tat_agent.service tat_agent_service.service stargate.service barad_agent.service YDService.service >/dev/null 2>&1 || true
         fi
-        pkill -9 -f 'tat_agent|secu-tcs-agent|sgagent|barad_agent|YDService|YDLive|ydservice' >/dev/null 2>&1 || true
-        rm -rf /usr/local/qcloud /etc/cron.d/sgagenttask \
-               /etc/systemd/system/tat_agent.service /etc/systemd/system/tat_agent_service.service 2>/dev/null || true
-        strip_cron_pattern 'qcloud|stargate|sgagent|barad|tat_agent'
-        ok "已清理腾讯云监控/TAT助手"
+        pkill -9 -f 'tat_agent|secu-tcs-agent|sgagent|barad_agent|YDService|YDLive|ydservice|sap100|sap_daemon' >/dev/null 2>&1 || true
+        rm -rf /usr/local/qcloud /usr/local/tat /usr/local/ta /usr/local/sa /usr/local/agenttools /etc/cron.d/sgagenttask \
+               /etc/systemd/system/tat_agent.service /etc/systemd/system/tat_agent_service.service /etc/systemd/system/YDService.service 2>/dev/null || true
+        strip_cron_pattern 'qcloud|stargate|sgagent|barad|tat_agent|YDService'
+        ok "已清理腾讯云监控/云镜/TAT助手"
     fi
 
-    if [ -d /usr/local/telescope ] || [ -d /usr/local/hostguard ] || [ -d /usr/local/uniagent ] || \
-       [ -f /etc/init.d/hostguard ] || is_pkg_installed hostguard; then
+    if [ -d /usr/local/telescope ] || [ -d /usr/local/hostguard ] || [ -d /usr/local/uniagent ] || [ -d /opt/uniagent ] || \
+       [ -d /usr/local/hss ] || [ -d /usr/local/agentguard ] || [ -f /etc/init.d/hostguard ] || is_pkg_installed hostguard; then
         found=1
-        if [ -x /usr/local/telescope/uninstall.sh ]; then
-            bash /usr/local/telescope/uninstall.sh >/dev/null 2>&1 || true
-        fi
+        local hw_u=""
+        for hw_u in /usr/local/telescope/uninstall.sh /usr/local/telescope/bin/uninstall.sh \
+                    /usr/local/uniagent/bin/uninstall.sh /opt/uniagent/bin/uninstall.sh \
+                    /usr/local/hss/uninstall.sh /usr/local/agentguard/uninstall.sh; do
+            if [ -x "$hw_u" ]; then
+                bash "$hw_u" >/dev/null 2>&1 || true
+            fi
+        done
         if [ -x /etc/init.d/hostguard ]; then
             /etc/init.d/hostguard stop >/dev/null 2>&1 || true
         fi
         if [ "$HAS_SYSTEMD" -eq 1 ]; then
-            systemctl disable --now uniagent.service telescoped.service hostguard.service >/dev/null 2>&1 || true
+            systemctl disable --now uniagent.service telescoped.service telescope.service hostguard.service hss.service >/dev/null 2>&1 || true
         fi
-        pkill -9 -f 'telescope|hostguard|uniagent' >/dev/null 2>&1 || true
+        pkill -9 -f 'telescope|hostguard|uniagent|agentguard' >/dev/null 2>&1 || true
         if is_pkg_installed hostguard; then
             apt-get purge -y hostguard >/dev/null 2>&1 || true
         fi
-        rm -rf /usr/local/telescope /usr/local/hostguard /usr/local/uniagent /etc/init.d/hostguard 2>/dev/null || true
+        rm -rf /usr/local/telescope /usr/local/hostguard /usr/local/uniagent /opt/uniagent /usr/local/hss /usr/local/agentguard /etc/init.d/hostguard 2>/dev/null || true
+        strip_cron_pattern 'telescope|hostguard|uniagent|agentguard'
         ok "已清理华为云监控/主机安全代理"
     fi
 
-    if [ -d /opt/ucloud/uagent ] || [ -d /usr/lib/ucloud/uagent ] || [ -d /usr/local/cloud-monitor ] || \
-       [ -d /opt/linode/longview ] || \
-       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-unit-files cloud-monitor-agent.service uagent.service bce-agent.service --no-legend 2>/dev/null | grep -q .; }; then
+    if [ -d /opt/ucloud/uagent ] || [ -d /usr/lib/ucloud/uagent ] || [ -d /usr/local/uagent ] || [ -d /etc/uagent ] || \
+       [ -d /usr/local/cloud-monitor ] || [ -d /opt/linode/longview ] || [ -d /usr/local/bce ] || [ -d /opt/bcm-agent ] || \
+       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-unit-files cloud-monitor-agent.service uagent.service bce-agent.service bcm-agent.service longview.service noderig.service beamium.service --no-legend 2>/dev/null | grep -q .; }; then
         found=1
         if [ "$HAS_SYSTEMD" -eq 1 ]; then
-            systemctl disable --now cloud-monitor-agent.service uagent.service bce-agent.service >/dev/null 2>&1 || true
+            systemctl disable --now cloud-monitor-agent.service uagent.service bce-agent.service bcm-agent.service longview.service noderig.service beamium.service >/dev/null 2>&1 || true
         fi
-        rm -rf /opt/ucloud/uagent /usr/lib/ucloud/uagent /usr/local/cloud-monitor /opt/linode/longview 2>/dev/null || true
+        rm -rf /opt/ucloud/uagent /usr/lib/ucloud/uagent /usr/local/uagent /etc/uagent /usr/local/cloud-monitor \
+               /opt/linode/longview /usr/local/bce /etc/bce /opt/bcm-agent 2>/dev/null || true
         ok "已清理其它云监控代理"
+    fi
+
+    if [ -f /etc/apt/sources.list.d/ovh-metrics.list ] || [ -f /etc/apt/sources.list.d/ovh-rtm.list ]; then
+        rm -f /etc/apt/sources.list.d/ovh-metrics.list /etc/apt/sources.list.d/ovh-rtm.list 2>/dev/null || true
+        found=1
     fi
 
     if command -v snap >/dev/null 2>&1; then
@@ -1706,23 +1751,32 @@ step_pkg_prune_and_upgrade() {
         dictionaries-common emacsen-common ispell iamerican ibritish
         ienglish-common wamerican installation-report popularity-contest
         reportbug debian-faq doc-debian util-linux-locales
+        packagekit packagekit-tools command-not-found python3-commandnotfound
         os-prober laptop-detect pcp pcp-conf
         bluez cups cups-browsed cups-common cups-client cups-daemon
-        avahi-daemon modemmanager wpasupplicant
+        avahi-daemon modemmanager wpasupplicant brltty telnet
         rpcbind nfs-common exim4 exim4-base exim4-config exim4-daemon-light
-        qemu-utils qemu-guest-agent xe-guest-utilities hyperv-daemons open-vm-tools
-        do-agent droplet-agent oracle-cloud-agent
-        amazon-ssm-agent amazon-cloudwatch-agent
-        google-cloud-ops-agent stackdriver-agent google-osconfig-agent
-        azuremonitoragent omsagent linode-longview
-        aliyun-assist aliyun_assist
+        qemu-utils qemu-guest-agent xe-guest-utilities open-vm-tools
+        do-agent droplet-agent oracle-cloud-agent osms-agent
+        amazon-ssm-agent amazon-cloudwatch-agent codedeploy-agent aws-codedeploy-agent
+        google-cloud-ops-agent stackdriver-agent google-osconfig-agent google-fluentd
+        azuremonitoragent omsagent mdsd linode-longview
+        ovh-rtm-binaries ovh-rtm-metrics-toolkit noderig beamium
+        aliyun-assist aliyun_assist ecs-assist tat-agent tat_agent
+        bce-agent bcm-agent uagent vultr-agent
     )
+    if [ "$VIRT_TYPE" != "microsoft" ]; then
+        raw_candidates+=(hyperv-daemons)
+    fi
     if [ "$OS_ID" = "ubuntu" ]; then
         raw_candidates+=(
             snapd apport whoopsie ubuntu-report landscape-common
-            ubuntu-pro-client ubuntu-advantage-tools
-            fwupd multipath-tools motd-news-config
+            ubuntu-pro-client ubuntu-advantage-tools ubuntu-advantage-desktop-daemon
+            fwupd motd-news-config
         )
+        if ! is_multipath_in_use; then
+            raw_candidates+=(multipath-tools)
+        fi
     fi
 
     local pkg=""
@@ -1736,13 +1790,13 @@ step_pkg_prune_and_upgrade() {
     if [ "${#to_purge[@]}" -gt 0 ]; then
         if [ "$OS_ID" = "ubuntu" ] && printf '%s\n' "${to_purge[@]}" | grep -qx 'snapd' && command -v snap >/dev/null 2>&1; then
             local s=""
-            for s in $(snap list 2>/dev/null | awk 'NR>1 {print $1}' | grep -vE '^(bare|core|snapd)$' || true); do
+            for s in $(snap list 2>/dev/null | awk 'NR>1 {print $1}' | grep -vE '^(bare|core|core[0-9]+|snapd)$' || true); do
                 snap remove --purge "$s" >/dev/null 2>&1 || true
             done
         fi
         run_logged "卸载 ${#to_purge[@]} 个冗余与监控软件包" apt-get purge -y --no-install-recommends "${to_purge[@]}" || true
         if [ "$OS_ID" = "ubuntu" ] && ! is_pkg_installed snapd; then
-            rm -rf /var/cache/snapd /root/snap /home/*/snap 2>/dev/null || true
+            rm -rf /var/cache/snapd /var/lib/snapd /var/snap /snap /root/snap /home/*/snap 2>/dev/null || true
         fi
     else
         ok "无待卸载冗余软件包"
@@ -1771,7 +1825,12 @@ step_pkg_prune_and_upgrade() {
         find /usr/share/doc -type f ! -name 'copyright' -delete 2>/dev/null || true
         find /usr/share/doc -type d -empty -delete 2>/dev/null || true
     fi
-    find /usr/share/man /usr/share/info /usr/share/lintian /usr/share/linda -type f -delete 2>/dev/null || true
+    local sd=""
+    for sd in /usr/share/man /usr/share/info /usr/share/lintian /usr/share/linda; do
+        [ -d "$sd" ] || continue
+        find "$sd" -type f -delete 2>/dev/null || true
+        find "$sd" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    done
     if [ -d /usr/share/locale ]; then
         local loc="" bname=""
         for loc in /usr/share/locale/*; do
@@ -1783,7 +1842,7 @@ step_pkg_prune_and_upgrade() {
             esac
         done
     fi
-    ok "现存文档与冗余多语言已清理"
+    ok "现存文档、手册与冗余多语言已清理"
 }
 
 step_service_prune() {
@@ -1802,18 +1861,23 @@ step_service_prune() {
         systemd-pstore.service
         e2scrub_all.timer e2scrub_reap.service
         man-db.timer
-        apt-daily.timer apt-daily-upgrade.timer
+        apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+        packagekit.service
         snapd.service snapd.socket snapd.seeded.service
         apport.service whoopsie.service fwupd.service
-        multipathd.service multipathd.socket
         motd-news.timer ua-timer.timer ubuntu-advantage.service
         qemu-guest-agent.service
         do-agent.service droplet-agent.service
-        oracle-cloud-agent.service
-        amazon-ssm-agent.service amazon-cloudwatch-agent.service
-        google-cloud-ops-agent.service stackdriver-agent.service google-osconfig-agent.service
+        oracle-cloud-agent.service osms-agent.service
+        amazon-ssm-agent.service amazon-cloudwatch-agent.service codedeploy-agent.service
+        google-cloud-ops-agent.service stackdriver-agent.service google-osconfig-agent.service google-fluentd.service
+        azuremonitoragent.service omsagent.service mdsd.service
+        noderig.service beamium.service ovh-rtm.service longview.service
         rdnssd.service
     )
+    if ! is_multipath_in_use; then
+        units+=(multipathd.service multipathd.socket)
+    fi
 
     local disabled_cnt=0
     local u=""
@@ -1860,14 +1924,31 @@ configure_bbr_fq() {
         fi
     fi
 
-    local def_dev="" cur_root_qdisc=""
+    local def_dev="" cur_root_qdisc="" ph=""
     def_dev="$(get_default_net_iface)"
     if [ -n "$def_dev" ] && [ -n "$chosen_qdisc" ] && command -v tc >/dev/null 2>&1; then
         cur_root_qdisc="$(tc qdisc show dev "$def_dev" 2>/dev/null | awk '/root/{print $2; exit}')"
-        if [ -n "$cur_root_qdisc" ] && [ "$cur_root_qdisc" != "$chosen_qdisc" ] && [ "$cur_root_qdisc" != "mq" ]; then
+        if [ "$cur_root_qdisc" = "mq" ]; then
+            while IFS= read -r ph; do
+                [ -n "$ph" ] || continue
+                tc qdisc replace dev "$def_dev" parent "$ph" "$chosen_qdisc" >/dev/null 2>&1 || true
+            done < <(tc qdisc show dev "$def_dev" 2>/dev/null | awk -v q="$chosen_qdisc" '!/root/ && /parent / && $2 != q {for(i=1;i<=NF;i++) if($i=="parent"){print $(i+1)}}' | sort -u || true)
+        elif [ -n "$cur_root_qdisc" ] && [ "$cur_root_qdisc" != "$chosen_qdisc" ] && [ "$cur_root_qdisc" != "noqueue" ]; then
             tc qdisc replace dev "$def_dev" root "$chosen_qdisc" >/dev/null 2>&1 || true
         fi
     fi
+
+    local target_real="" sf="" sf_real=""
+    target_real="$(readlink -f "$SYSCTL_TARGET" 2>/dev/null || printf '%s' "$SYSCTL_TARGET")"
+    for sf in /etc/sysctl.d/*.conf; do
+        if [ ! -f "$sf" ] || [ -L "$sf" ]; then
+            continue
+        fi
+        sf_real="$(readlink -f "$sf" 2>/dev/null || printf '%s' "$sf")"
+        [ "$sf_real" = "$target_real" ] && continue
+        delete_sysctl_kv "$sf" "net.core.default_qdisc" || true
+        delete_sysctl_kv "$sf" "net.ipv4.tcp_congestion_control" || true
+    done
 
     local avail_cc=""
     avail_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
@@ -1948,7 +2029,7 @@ apply_sysctl_optimizations() {
         "net.ipv4.tcp_sack=1"
         "net.ipv4.tcp_window_scaling=1"
         "net.ipv4.tcp_moderate_rcvbuf=1"
-        "net.ipv4.tcp_fastopen=2"
+        "net.ipv4.tcp_fastopen=3"
         "net.ipv4.tcp_mtu_probing=1"
         "net.ipv4.tcp_slow_start_after_idle=0"
         "net.ipv4.tcp_notsent_lowat=${notsent_lowat}"
@@ -2208,11 +2289,12 @@ step_deep_cleanup() {
     fi
     run_logged "清理孤立依赖包" apt-get autoremove --purge -y -q || true
     apt-get clean -qq >/dev/null 2>&1 || true
-    find /var/lib/apt/lists -maxdepth 1 -type f -delete 2>/dev/null || true
-    find /var/lib/apt/periodic /var/cache/apt -maxdepth 1 -type f -delete 2>/dev/null || true
+    find /var/lib/apt/lists -type f ! -name 'lock' -delete 2>/dev/null || true
+    find /var/lib/apt/periodic /var/cache/apt -type f ! -name 'lock' -delete 2>/dev/null || true
     find /var/cache/debconf /var/lib/dpkg -maxdepth 1 -type f -name '*-old' -delete 2>/dev/null || true
     find /var/cache/man /var/cache/fontconfig -type f -delete 2>/dev/null || true
-    find /var/backups -type f \( -name '*.gz' -o -name '*.bak' -o -name '*.old' -o -name 'dpkg.*' -o -name 'apt.*' -o -name 'alternatives.*' \) -delete 2>/dev/null || true
+    rm -f /var/cache/motd-news 2>/dev/null || true
+    find /var/backups -mindepth 1 -type f -delete 2>/dev/null || true
     ok "APT 索引、缓存与系统备份已清理"
 
     if [ "$IS_CONTAINER" -eq 0 ]; then
@@ -2237,7 +2319,8 @@ step_deep_cleanup() {
     rm -f /vmlinuz.old /initrd.img.old /boot/vmlinuz.old /boot/initrd.img.old /boot/*.old /boot/*.bak 2>/dev/null || true
     ok "配置残留与备份文件已清理"
 
-    find /var/crash /var/lib/systemd/coredump /var/lib/apport/coredump -type f -delete 2>/dev/null || true
+    find /var/crash /var/lib/systemd/coredump /var/lib/apport/coredump /var/lib/systemd/pstore /var/lib/whoopsie -type f -delete 2>/dev/null || true
+    find /var/mail /var/spool/mail -type f -exec truncate -s 0 {} \; 2>/dev/null || true
     if command -v file >/dev/null 2>&1; then
         find /var /opt /srv /root /home -type f \( -name 'core' -o -name 'core.[0-9]*' \) -exec sh -c '
             for f in "$@"; do
@@ -2276,11 +2359,11 @@ step_deep_cleanup() {
     fi
     find /var/log/journal -type f -name '*.journal~' -delete 2>/dev/null || true
     if [ -d /var/log ]; then
-        rm -rf /var/log/installer /var/log/apt/* /var/log/unattended-upgrades/* 2>/dev/null || true
+        rm -rf /var/log/installer /var/log/apt/* /var/log/unattended-upgrades/* /var/log/aegis* 2>/dev/null || true
         find /var/log -path '/var/log/journal' -prune -o \
-            -type f \( -name '*.log.*' -o -name '*.gz' -o -name '*.xz' -o -name '*.bz2' -o -name '*.zst' -o -name '*.old' -o -name '*.[0-9]' -o -name 'cloud-init*.log' \) -delete 2>/dev/null || true
+            -type f \( -name '*.log.*' -o -name '*.gz' -o -name '*.xz' -o -name '*.bz2' -o -name '*.zst' -o -name '*.old' -o -name '*.[0-9]' -o -name 'cloud-init*.log*' -o -name 'waagent.log*' \) -delete 2>/dev/null || true
         find /var/log -path '/var/log/journal' -prune -o \
-            -type f -exec truncate -s 0 {} \; 2>/dev/null || true
+            -type f ! -name '*.db' ! -name '*.sqlite*' -exec truncate -s 0 {} \; 2>/dev/null || true
     fi
     ok "全部日志与用户历史缓存已清理"
 
