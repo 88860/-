@@ -12,6 +12,7 @@ HAS_IPV4=0
 HAS_IPV6=0
 HAS_ZRAM=0
 MEM_MB=0
+SWAP_MB=0
 VIRT_LABEL="物理机/VM"
 SYSCTL_TARGET=""
 MODULES_TARGET=""
@@ -649,6 +650,7 @@ detect_system_info() {
     fi
 
     MEM_MB="$(awk '/^MemTotal:/ {printf "%d", int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+    SWAP_MB="$(awk '/^SwapTotal:/ {printf "%d", int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
     if grep -q 'zram' /proc/swaps 2>/dev/null; then
         HAS_ZRAM=1
     fi
@@ -683,7 +685,7 @@ format_dns_lines() {
 }
 
 print_detection_summary() {
-    local disk_info bbr_stat host_now push_stat
+    local disk_info bbr_stat host_now push_stat mem_note=""
     disk_info="$(df -Ph / 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s)", $3, $2, $5}')"
     host_now="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)"
     bbr_stat="$(probe_bbr_capability_summary)"
@@ -691,6 +693,11 @@ print_detection_summary() {
         push_stat="${C_BYLW}有下发风险 (${#DHCP_PUSH_REASONS[@]}项)${C_RST}"
     else
         push_stat="${C_GRN}静态受控${C_RST}"
+    fi
+    if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 1024 ] && [ "$SWAP_MB" -eq 0 ] && [ "$IS_CONTAINER" -eq 0 ]; then
+        mem_note=" ${C_BYLW}(无Swap)${C_RST}"
+    elif [ "$SWAP_MB" -gt 0 ]; then
+        mem_note=" · Swap ${SWAP_MB} MB"
     fi
 
     echo ""
@@ -700,7 +707,7 @@ print_detection_summary() {
     echo -e "  ${C_DIM}系统:${C_RST} ${C_BWHT}${OS_PRETTY}${C_RST}"
     echo -e "  ${C_DIM}内核:${C_RST} $(uname -r)"
     echo -e "  ${C_DIM}主机:${C_RST} ${host_now} · ${VIRT_LABEL}"
-    echo -e "  ${C_DIM}内存:${C_RST} ${MEM_MB} MB"
+    echo -e "  ${C_DIM}内存:${C_RST} ${MEM_MB} MB${mem_note}"
     echo -e "  ${C_DIM}磁盘:${C_RST} ${disk_info}"
     echo -e "  ${C_DIM}网管:${C_RST} ${NET_MANAGERS[*]}"
     format_dns_lines
@@ -1340,37 +1347,122 @@ configure_bbr_fq() {
     fi
 }
 
+upsert_sysctl_min_kv() {
+    local file="$1"
+    local key="$2"
+    local min_val="$3"
+    local cur_live="" cur_cfg=""
+    cur_live="$(sysctl -n "$key" 2>/dev/null || true)"
+    if [ -f "$file" ]; then
+        cur_cfg="$(awk -v tkey="$key" '
+            {
+                raw = $0; sub(/^[[:space:]]+/, "", raw)
+                if (raw ~ /^[#;]/) next
+                eq = index(raw, "=")
+                if (eq > 0) {
+                    k = substr(raw, 1, eq - 1); sub(/[[:space:]]+$/, "", k); gsub(/\//, ".", k)
+                    if (k == tkey) {
+                        v = substr(raw, eq + 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+                        val = v
+                    }
+                }
+            }
+            END { print val }
+        ' "$file")"
+    fi
+    if [ -n "$cur_cfg" ]; then
+        if [[ "$cur_cfg" =~ ^[0-9]+$ ]] && [ "$cur_cfg" -ge "$min_val" ]; then
+            return 1
+        fi
+        upsert_sysctl_kv "$file" "$key" "$min_val"
+        return $?
+    fi
+    if [[ "$cur_live" =~ ^[0-9]+$ ]] && [ "$cur_live" -ge "$min_val" ]; then
+        return 1
+    fi
+    upsert_sysctl_kv "$file" "$key" "$min_val"
+}
+
 apply_sysctl_optimizations() {
     if [ ! -w /proc/sys/net/ipv4/tcp_fastopen ] 2>/dev/null && [ "$IS_CONTAINER" -eq 1 ]; then
         warn "容器环境无 sysctl 写权限，跳过内核参数"
         return 0
     fi
 
-    local syn_backlog=4096 buf_max=16777216
-    if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 512 ]; then
-        syn_backlog=1024
-    fi
+    local syn_backlog=4096 sock_max=16777216 tcp_max=16777216 tcp_wmem_def=65536
+    local notsent_lowat=131072 udp_min=16384 inotify_watches=524288 default_buf=262144
     if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 768 ]; then
-        buf_max=4194304
+        syn_backlog=1024
+        sock_max=4194304
+        tcp_max=4194304
+        tcp_wmem_def=16384
+        notsent_lowat=65536
+        udp_min=8192
+        inotify_watches=131072
+        default_buf=212992
+    elif [ "$MEM_MB" -ge 3584 ]; then
+        syn_backlog=8192
+        sock_max=67108864
+        tcp_max=33554432
+    elif [ "$MEM_MB" -ge 1536 ]; then
+        syn_backlog=8192
+        sock_max=33554432
+        tcp_max=33554432
     fi
 
     local -a sysctl_pairs=(
         "net.core.somaxconn=4096"
         "net.core.netdev_max_backlog=4096"
-        "net.core.rmem_max=${buf_max}"
-        "net.core.wmem_max=${buf_max}"
-        "net.ipv4.tcp_rmem=4096 87380 ${buf_max}"
-        "net.ipv4.tcp_wmem=4096 16384 ${buf_max}"
+        "net.core.rmem_max=${sock_max}"
+        "net.core.wmem_max=${sock_max}"
+        "net.ipv4.tcp_rmem=4096 131072 ${tcp_max}"
+        "net.ipv4.tcp_wmem=4096 ${tcp_wmem_def} ${tcp_max}"
+        "net.ipv4.udp_rmem_min=${udp_min}"
+        "net.ipv4.udp_wmem_min=${udp_min}"
         "net.ipv4.tcp_max_syn_backlog=${syn_backlog}"
         "net.ipv4.ip_local_port_range=10000 65535"
-        "net.ipv4.tcp_fastopen=3"
+        "net.ipv4.tcp_timestamps=1"
+        "net.ipv4.tcp_sack=1"
+        "net.ipv4.tcp_window_scaling=1"
+        "net.ipv4.tcp_moderate_rcvbuf=1"
+        "net.ipv4.tcp_fastopen=2"
         "net.ipv4.tcp_mtu_probing=1"
         "net.ipv4.tcp_slow_start_after_idle=0"
-        "net.ipv4.tcp_notsent_lowat=16384"
+        "net.ipv4.tcp_notsent_lowat=${notsent_lowat}"
+        "net.ipv4.tcp_fin_timeout=30"
+        "net.ipv4.tcp_keepalive_time=600"
+        "net.ipv4.tcp_keepalive_intvl=30"
+        "net.ipv4.tcp_keepalive_probes=3"
+        "net.ipv4.tcp_rfc1337=1"
+        "net.ipv4.tcp_syncookies=1"
+        "net.ipv4.icmp_echo_ignore_broadcasts=1"
+        "net.ipv4.icmp_ignore_bogus_error_responses=1"
+        "net.ipv4.conf.all.accept_redirects=0"
+        "net.ipv4.conf.default.accept_redirects=0"
+        "net.ipv4.conf.all.send_redirects=0"
+        "net.ipv4.conf.default.send_redirects=0"
+        "net.ipv6.conf.all.accept_redirects=0"
+        "net.ipv6.conf.default.accept_redirects=0"
+        "vm.vfs_cache_pressure=50"
+        "vm.dirty_background_ratio=5"
+        "vm.dirty_ratio=10"
+        "fs.inotify.max_user_instances=1024"
+        "fs.suid_dumpable=0"
+        "fs.protected_hardlinks=1"
+        "fs.protected_symlinks=1"
+        "kernel.kptr_restrict=1"
+        "kernel.dmesg_restrict=1"
     )
     if [ "$HAS_ZRAM" -eq 0 ]; then
         sysctl_pairs+=("vm.swappiness=10")
     fi
+
+    local -a sysctl_min_pairs=(
+        "net.core.optmem_max=65536"
+        "fs.inotify.max_user_watches=${inotify_watches}"
+        "net.core.rmem_default=${default_buf}"
+        "net.core.wmem_default=${default_buf}"
+    )
 
     local item="" k="" v="" ppath="" changed=0
     for item in "${sysctl_pairs[@]}"; do
@@ -1383,6 +1475,17 @@ apply_sysctl_optimizations() {
             fi
         else
             delete_sysctl_kv "$SYSCTL_TARGET" "$k" || true
+        fi
+    done
+
+    for item in "${sysctl_min_pairs[@]}"; do
+        k="${item%%=*}"
+        v="${item#*=}"
+        ppath="/proc/sys/${k//./\/}"
+        if [ -e "$ppath" ] && [ -w "$ppath" ]; then
+            if upsert_sysctl_min_kv "$SYSCTL_TARGET" "$k" "$v"; then
+                changed=1
+            fi
         fi
     done
 
@@ -1461,7 +1564,7 @@ patch_sshd_config() {
     ensure_tmp_work
     local ssh_bak="${TMP_WORK}/sshd_config.bak"
     cp -p "$ssh_conf" "$ssh_bak" 2>/dev/null || true
-    local ssh_body=$'UseDNS no\nGSSAPIAuthentication no'
+    local ssh_body=$'UseDNS no\nGSSAPIAuthentication no\nClientAliveInterval 60\nClientAliveCountMax 3'
     if upsert_block_file "$ssh_conf" "# >>> sys-opt-ssh >>>" "# <<< sys-opt-ssh <<<" "$ssh_body" '^[[:space:]]*Include[[:space:]]+'; then
         [ -d /run/sshd ] || mkdir -p /run/sshd 2>/dev/null || true
         if command -v sshd >/dev/null 2>&1; then
@@ -1469,13 +1572,13 @@ patch_sshd_config() {
                 if [ "$HAS_SYSTEMD" -eq 1 ]; then
                     systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
                 fi
-                ok "SSH 已写入 UseDNS no 并重载"
+                ok "SSH 已更新防超时/免反查并重载"
             else
                 cp -p "$ssh_bak" "$ssh_conf" 2>/dev/null || true
                 warn "sshd -t 校验未通过，已还原原 SSH 配置"
             fi
         else
-            ok "SSH 已写入 UseDNS no"
+            ok "SSH 已更新防超时/免反查"
         fi
     else
         ok "SSH 配置已就绪"
@@ -1509,9 +1612,14 @@ step_system_optimize() {
     apply_sysctl_optimizations
 
     if [ -f /etc/systemd/journald.conf ]; then
-        if upsert_ini_section /etc/systemd/journald.conf "[Journal]" \
-            "Compress=yes" "SystemMaxUse=32M" "SystemMaxFileSize=4M" "SystemMaxFiles=8" \
-            "RuntimeMaxUse=8M" "RuntimeMaxFileSize=2M" "RuntimeMaxFiles=4" "MaxRetentionSec=7day"; then
+        local -a j_opts=(
+            "Compress=yes" "SystemMaxUse=32M" "SystemMaxFileSize=4M" "SystemMaxFiles=8"
+            "RuntimeMaxUse=8M" "RuntimeMaxFileSize=2M" "RuntimeMaxFiles=4" "MaxRetentionSec=7day"
+        )
+        if ! is_pkg_installed rsyslog; then
+            j_opts+=("ForwardToSyslog=no")
+        fi
+        if upsert_ini_section /etc/systemd/journald.conf "[Journal]" "${j_opts[@]}"; then
             if [ "$HAS_SYSTEMD" -eq 1 ]; then
                 systemctl restart systemd-journald >/dev/null 2>&1 || true
             fi
@@ -1521,6 +1629,13 @@ step_system_optimize() {
         fi
         if compgen -G "/etc/systemd/journald.conf.d/*.conf" >/dev/null 2>&1; then
             warn "检测到 journald.conf.d 存在外部覆盖项"
+        fi
+    fi
+
+    if [ "$IS_CONTAINER" -eq 0 ] && [ "$HAS_SYSTEMD" -eq 1 ] && command -v timedatectl >/dev/null 2>&1; then
+        if systemctl list-unit-files systemd-timesyncd.service chrony.service --no-legend 2>/dev/null | grep -q .; then
+            timedatectl set-ntp true >/dev/null 2>&1 || true
+            ok "NTP 时间同步已启用"
         fi
     fi
 
