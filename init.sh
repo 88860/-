@@ -21,8 +21,14 @@ TMP_WORK=""
 AUTO_YES=0
 INITRAMFS_DIRTY=0
 
+NETPLAN_ACTIVE=0
+NM_ACTIVE=0
+RDNSSD_ACTIVE=0
+RESOLVCONF_ACTIVE=0
+
 NET_MANAGERS=()
-DHCP_PUSH_REASONS=()
+DNS_PUSH_SOURCES=()
+HOST_PUSH_SOURCES=()
 DNS_ORDER=()
 
 init_colors() {
@@ -170,6 +176,17 @@ run_logged() {
         done
     fi
     return 1
+}
+
+add_unique_item() {
+    local arr_name="$1"
+    local val="$2"
+    local -n arr_ref="$arr_name"
+    local item=""
+    for item in "${arr_ref[@]}"; do
+        [ "$item" = "$val" ] && return 0
+    done
+    arr_ref+=("$val")
 }
 
 atomic_replace_if_changed() {
@@ -348,6 +365,42 @@ upsert_sysctl_kv() {
     atomic_replace_if_changed "$tmp_f" "$file" 0644
 }
 
+upsert_sysctl_min_kv() {
+    local file="$1"
+    local key="$2"
+    local min_val="$3"
+    local cur_live="" cur_cfg=""
+    cur_live="$(sysctl -n "$key" 2>/dev/null || true)"
+    if [ -f "$file" ]; then
+        cur_cfg="$(awk -v tkey="$key" '
+            {
+                raw = $0; sub(/^[[:space:]]+/, "", raw)
+                if (raw ~ /^[#;]/) next
+                eq = index(raw, "=")
+                if (eq > 0) {
+                    k = substr(raw, 1, eq - 1); sub(/[[:space:]]+$/, "", k); gsub(/\//, ".", k)
+                    if (k == tkey) {
+                        v = substr(raw, eq + 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+                        val = v
+                    }
+                }
+            }
+            END { print val }
+        ' "$file")"
+    fi
+    if [ -n "$cur_cfg" ]; then
+        if [[ "$cur_cfg" =~ ^[0-9]+$ ]] && [ "$cur_cfg" -ge "$min_val" ]; then
+            return 1
+        fi
+        upsert_sysctl_kv "$file" "$key" "$min_val"
+        return $?
+    fi
+    if [[ "$cur_live" =~ ^[0-9]+$ ]] && [ "$cur_live" -ge "$min_val" ]; then
+        return 1
+    fi
+    upsert_sysctl_kv "$file" "$key" "$min_val"
+}
+
 delete_sysctl_kv() {
     local file="$1"
     local key="$2"
@@ -477,9 +530,116 @@ is_loadable_mod() {
     ! is_builtin_mod "$mod" && command -v modinfo >/dev/null 2>&1 && modinfo -n "$mod" >/dev/null 2>&1
 }
 
+get_default_net_iface() {
+    local dev=""
+    dev="$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    if [ -z "$dev" ]; then
+        dev="$(ip -6 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    fi
+    printf '%s' "$dev"
+}
+
+get_live_nic_qdisc() {
+    local dev="$1"
+    [ -n "$dev" ] && command -v tc >/dev/null 2>&1 || return 0
+    local line="" q=""
+    line="$(tc qdisc show dev "$dev" 2>/dev/null | awk '/root/{print $2; exit}')"
+    if [ "$line" = "mq" ]; then
+        q="$(tc qdisc show dev "$dev" 2>/dev/null | awk '!/root/ && NR<=4 {print $2}' | sort -u | paste -sd ',' -)"
+        if [ -n "$q" ]; then
+            printf 'mq(%s)' "$q"
+        else
+            printf 'mq'
+        fi
+    elif [ -n "$line" ]; then
+        printf '%s' "$line"
+    fi
+}
+
+get_cloudinit_effective_bool() {
+    local key="$1"
+    local val="" f="" hit=""
+    for f in /etc/cloud/cloud.cfg /etc/cloud/cloud.cfg.d/*.cfg; do
+        [ -f "$f" ] || continue
+        hit="$(awk -v k="$key" '
+            /^[[:space:]]*#/ { next }
+            $0 ~ "^[[:space:]]*" k ":[[:space:]]*" {
+                line = $0
+                sub("^[[:space:]]*" k ":[[:space:]]*", "", line)
+                sub(/[[:space:]]*#.*/, "", line)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                res = tolower(line)
+            }
+            END { if (res != "") print res }
+        ' "$f")"
+        [ -n "$hit" ] && val="$hit"
+    done
+    printf '%s' "$val"
+}
+
+ifupdown_has_dhcp() {
+    local -a files=()
+    [ -f /etc/network/interfaces ] && files+=(/etc/network/interfaces)
+    local f=""
+    for f in /etc/network/interfaces.d/*; do
+        [ -f "$f" ] && files+=("$f")
+    done
+    [ "${#files[@]}" -gt 0 ] || return 1
+    grep -qE '^[[:space:]]*iface[[:space:]]+[^[:space:]]+[[:space:]]+inet6?[[:space:]]+dhcp([[:space:]]|$)' "${files[@]}" 2>/dev/null
+}
+
+check_netplan_push_flags() {
+    local file="$1"
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+        python3 - "$file" 2>/dev/null <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+net = data.get('network', {}) if isinstance(data, dict) else {}
+if not isinstance(net, dict):
+    sys.exit(0)
+push_dns = False
+push_host = False
+for sec in ('ethernets', 'wifis'):
+    devs = net.get(sec)
+    if not isinstance(devs, dict):
+        continue
+    for _, cfg in devs.items():
+        if not isinstance(cfg, dict):
+            continue
+        for ver in ('4', '6'):
+            if str(cfg.get(f'dhcp{ver}', '')).lower() in ('true', 'yes', '1'):
+                ov = cfg.get(f'dhcp{ver}-overrides') or {}
+                if ov.get('use-dns') is not False:
+                    push_dns = True
+                if ov.get('use-hostname') is not False:
+                    push_host = True
+        if str(cfg.get('accept-ra', '')).lower() in ('true', 'yes', '1'):
+            ov6 = cfg.get('dhcp6-overrides') or {}
+            if ov6.get('use-dns') is not False:
+                push_dns = True
+if push_dns:
+    print('DNS')
+if push_host:
+    print('HOST')
+PYEOF
+        return 0
+    fi
+    if grep -qE '^[[:space:]]*dhcp[46]:[[:space:]]*(true|yes)' "$file" 2>/dev/null; then
+        grep -qE '^[[:space:]]*use-dns:[[:space:]]*(false|no)' "$file" 2>/dev/null || echo "DNS"
+        grep -qE '^[[:space:]]*use-hostname:[[:space:]]*(false|no)' "$file" 2>/dev/null || echo "HOST"
+    fi
+}
+
 detect_network_and_push_status() {
+    NETPLAN_ACTIVE=0
+    NM_ACTIVE=0
+    RDNSSD_ACTIVE=0
+    RESOLVCONF_ACTIVE=0
+
     NET_MANAGERS=()
-    DHCP_PUSH_REASONS=()
+    DNS_PUSH_SOURCES=()
+    HOST_PUSH_SOURCES=()
 
     if ip -4 route show default 2>/dev/null | grep -q .; then
         HAS_IPV4=1
@@ -503,71 +663,134 @@ detect_network_and_push_status() {
         DNS_ORDER=("1.1.1.1" "8.8.8.8" "2606:4700:4700::1111" "2001:4860:4860::8888")
     fi
 
-    if [ -f /etc/dhcpcd.conf ]; then
-        NET_MANAGERS+=("dhcpcd")
-        if ! grep -qE '^[[:space:]]*nohook[[:space:]].*resolv\.conf' /etc/dhcpcd.conf 2>/dev/null || \
-           ! grep -qE '^[[:space:]]*nohook[[:space:]].*hostname' /etc/dhcpcd.conf 2>/dev/null; then
-            DHCP_PUSH_REASONS+=("dhcpcd 未禁用 resolv.conf/hostname hook")
+    local has_ifup_dhcp=0
+    if ifupdown_has_dhcp; then
+        has_ifup_dhcp=1
+    fi
+
+    if pgrep -x dhcpcd >/dev/null 2>&1 || \
+       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-units --state=active --no-legend 'dhcpcd*' 2>/dev/null | grep -q .; } || \
+       compgen -G "/run/dhcpcd/*.lease" >/dev/null 2>&1 || \
+       { [ "$has_ifup_dhcp" -eq 1 ] && is_pkg_installed dhcpcd-base && ! is_pkg_installed isc-dhcp-client; }; then
+        add_unique_item NET_MANAGERS "dhcpcd"
+        if [ -f /etc/dhcpcd.conf ]; then
+            if ! grep -qE '^[[:space:]]*nohook[[:space:]].*resolv\.conf' /etc/dhcpcd.conf 2>/dev/null; then
+                add_unique_item DNS_PUSH_SOURCES "dhcpcd"
+            fi
+            if ! grep -qE '^[[:space:]]*nohook[[:space:]].*hostname' /etc/dhcpcd.conf 2>/dev/null; then
+                add_unique_item HOST_PUSH_SOURCES "dhcpcd"
+            fi
         fi
     fi
 
-    if [ -f /etc/dhcp/dhclient.conf ]; then
-        NET_MANAGERS+=("dhclient")
-        if grep -qE '^[[:space:]]*request[[:space:]].*(domain-name-servers|host-name)' /etc/dhcp/dhclient.conf 2>/dev/null; then
-            DHCP_PUSH_REASONS+=("dhclient 请求了 DNS 或主机名")
+    local has_dhc_lease=0 lf=""
+    for lf in /var/lib/dhcp/dhclient*.leases /var/lib/dhcp3/dhclient*.leases; do
+        [ -s "$lf" ] && { has_dhc_lease=1; break; }
+    done
+    if pgrep -x dhclient >/dev/null 2>&1 || [ "$has_dhc_lease" -eq 1 ] || \
+       { [ "$has_ifup_dhcp" -eq 1 ] && is_pkg_installed isc-dhcp-client; }; then
+        add_unique_item NET_MANAGERS "dhclient"
+        if [ -f /etc/dhcp/dhclient.conf ]; then
+            local clean_dhc=""
+            clean_dhc="$(sed 's/#.*$//' /etc/dhcp/dhclient.conf 2>/dev/null | tr '\n' ' ')"
+            if grep -qE '\brequest\b[^;]*(domain-name-servers|domain-name|domain-search|dhcp6\.name-servers)' <<< "$clean_dhc" && \
+               ! grep -qE '\bsupersede[[:space:]]+domain-name-servers\b' <<< "$clean_dhc"; then
+                add_unique_item DNS_PUSH_SOURCES "dhclient"
+            fi
+            if grep -qE '\brequest\b[^;]*host-name' <<< "$clean_dhc"; then
+                add_unique_item HOST_PUSH_SOURCES "dhclient"
+            fi
+        fi
+        if [ -f /etc/dhcp/dhclient.d/google_hostname.sh ]; then
+            add_unique_item HOST_PUSH_SOURCES "gcp-dhcp"
         fi
     fi
 
     if compgen -G "/etc/netplan/*.yaml" >/dev/null 2>&1; then
-        NET_MANAGERS+=("netplan")
-        if grep -qE 'dhcp[46]:[[:space:]]*(true|yes)' /etc/netplan/*.yaml 2>/dev/null; then
-            if ! grep -qE 'use-dns:[[:space:]]*(false|no)' /etc/netplan/*.yaml 2>/dev/null || \
-               ! grep -qE 'use-hostname:[[:space:]]*(false|no)' /etc/netplan/*.yaml 2>/dev/null; then
-                DHCP_PUSH_REASONS+=("netplan DHCP 未关闭 DNS/主机名接管")
+        NETPLAN_ACTIVE=1
+        add_unique_item NET_MANAGERS "netplan"
+        local yf="" flags=""
+        for yf in /etc/netplan/*.yaml; do
+            [ -f "$yf" ] || continue
+            flags="$(check_netplan_push_flags "$yf")"
+            grep -qx 'DNS' <<< "$flags" && add_unique_item DNS_PUSH_SOURCES "netplan"
+            grep -qx 'HOST' <<< "$flags" && add_unique_item HOST_PUSH_SOURCES "netplan"
+        done
+    fi
+
+    if { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-networkd 2>/dev/null; } || \
+       compgen -G "/run/systemd/netif/leases/*" >/dev/null 2>&1 || \
+       compgen -G "/etc/systemd/network/*.network" >/dev/null 2>&1; then
+        add_unique_item NET_MANAGERS "networkd"
+        local nf=""
+        for nf in /etc/systemd/network/*.network /run/systemd/network/*.network; do
+            [ -f "$nf" ] || continue
+            if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv4|ipv6|both)' "$nf" 2>/dev/null || \
+               grep -qE '^[[:space:]]*IPv6AcceptRA[[:space:]]*=[[:space:]]*(yes|true|1)' "$nf" 2>/dev/null; then
+                grep -qE '^[[:space:]]*UseDNS[[:space:]]*=[[:space:]]*(no|false|0)' "$nf" 2>/dev/null || add_unique_item DNS_PUSH_SOURCES "networkd"
+                if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv4|ipv6|both)' "$nf" 2>/dev/null; then
+                    grep -qE '^[[:space:]]*UseHostname[[:space:]]*=[[:space:]]*(no|false|0)' "$nf" 2>/dev/null || add_unique_item HOST_PUSH_SOURCES "networkd"
+                fi
             fi
-        fi
+        done
+        local nl=""
+        for nl in /run/systemd/netif/leases/*; do
+            [ -f "$nl" ] || continue
+            grep -qE '^DNS=.+' "$nl" 2>/dev/null && add_unique_item DNS_PUSH_SOURCES "dhcp-lease"
+            grep -qE '^HOSTNAME=.+' "$nl" 2>/dev/null && add_unique_item HOST_PUSH_SOURCES "dhcp-lease"
+        done
     fi
 
-    if compgen -G "/etc/systemd/network/*.network" >/dev/null 2>&1; then
-        NET_MANAGERS+=("networkd")
-        if grep -qE '^[[:space:]]*DHCP[[:space:]]*=[[:space:]]*(yes|true|ipv4|ipv6)' /etc/systemd/network/*.network 2>/dev/null; then
-            if ! grep -qE '^[[:space:]]*UseDNS[[:space:]]*=[[:space:]]*(no|false)' /etc/systemd/network/*.network 2>/dev/null || \
-               ! grep -qE '^[[:space:]]*UseHostname[[:space:]]*=[[:space:]]*(no|false)' /etc/systemd/network/*.network 2>/dev/null; then
-                DHCP_PUSH_REASONS+=("systemd-networkd 未设置 UseDNS/UseHostname=no")
-            fi
-        fi
+    if { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; } || \
+       { [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q 'systemd/resolve'; }; then
+        add_unique_item NET_MANAGERS "resolved"
+        add_unique_item DNS_PUSH_SOURCES "systemd-resolved"
     fi
 
-    if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        NET_MANAGERS+=("systemd-resolved")
-        DHCP_PUSH_REASONS+=("systemd-resolved 正在接管 DNS")
-    elif [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q 'systemd/resolve'; then
-        DHCP_PUSH_REASONS+=("/etc/resolv.conf 仍指向 systemd-resolved")
+    if pgrep -x rdnssd >/dev/null 2>&1 || { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet rdnssd 2>/dev/null; }; then
+        RDNSSD_ACTIVE=1
+        add_unique_item DNS_PUSH_SOURCES "rdnssd-RA"
     fi
 
-    if [ -f /etc/cloud/cloud.cfg ]; then
-        NET_MANAGERS+=("cloud-init")
-        if ! grep -qE '^[[:space:]]*preserve_hostname:[[:space:]]*true' /etc/cloud/cloud.cfg 2>/dev/null; then
-            DHCP_PUSH_REASONS+=("cloud-init 未锁定 preserve_hostname")
-        fi
+    if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -q 'resolvconf'; then
+        RESOLVCONF_ACTIVE=1
+        add_unique_item DNS_PUSH_SOURCES "resolvconf"
     fi
 
     if [ -f /etc/NetworkManager/NetworkManager.conf ] && [ "$HAS_SYSTEMD" -eq 1 ] && \
        systemctl is-active --quiet NetworkManager 2>/dev/null; then
-        NET_MANAGERS+=("NetworkManager")
+        NM_ACTIVE=1
+        add_unique_item NET_MANAGERS "NetworkManager"
         if ! grep -qE '^[[:space:]]*dns[[:space:]]*=[[:space:]]*none' /etc/NetworkManager/NetworkManager.conf 2>/dev/null; then
-            DHCP_PUSH_REASONS+=("NetworkManager 管理着 resolv.conf")
+            add_unique_item DNS_PUSH_SOURCES "NetworkManager"
         fi
     fi
 
+    if [ -f /etc/cloud/cloud.cfg ] && [ ! -f /etc/cloud/cloud-init.disabled ]; then
+        add_unique_item NET_MANAGERS "cloud-init"
+        local ci_pres="" ci_dns=""
+        ci_pres="$(get_cloudinit_effective_bool "preserve_hostname")"
+        if [ "$ci_pres" != "true" ]; then
+            add_unique_item HOST_PUSH_SOURCES "cloud-init"
+        fi
+        ci_dns="$(get_cloudinit_effective_bool "manage_resolv_conf")"
+        if [ "$ci_dns" = "true" ]; then
+            add_unique_item DNS_PUSH_SOURCES "cloud-init"
+        fi
+    fi
+
+    if [ -f /etc/waagent.conf ] && grep -qE '^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=[[:space:]]*y' /etc/waagent.conf 2>/dev/null; then
+        add_unique_item HOST_PUSH_SOURCES "waagent"
+    fi
+
     if [ -f /etc/resolv.conf ]; then
-        if grep -qiE 'Generated by (dhcpcd|resolvconf|NetworkManager|systemd-resolved)' /etc/resolv.conf 2>/dev/null; then
-            DHCP_PUSH_REASONS+=("resolv.conf 带有动态生成标记")
-        elif grep -qE '^[[:space:]]*nameserver[[:space:]]+(127\.0\.0\.53|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.)' /etc/resolv.conf 2>/dev/null; then
-            DHCP_PUSH_REASONS+=("resolv.conf 含内网/本地动态 DNS")
+        if grep -qiE 'Generated by (dhcpcd|resolvconf|NetworkManager|systemd-resolved|cloud-init)' /etc/resolv.conf 2>/dev/null; then
+            add_unique_item DNS_PUSH_SOURCES "resolv.conf标记"
+        elif grep -qE '^[[:space:]]*nameserver[[:space:]]+(127\.0\.0\.53|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|169\.254\.|183\.60\.83\.19)' /etc/resolv.conf 2>/dev/null; then
+            add_unique_item DNS_PUSH_SOURCES "内网/云DNS"
         fi
     else
-        DHCP_PUSH_REASONS+=("缺少 /etc/resolv.conf")
+        add_unique_item DNS_PUSH_SOURCES "缺失"
     fi
 
     if [ "${#NET_MANAGERS[@]}" -eq 0 ]; then
@@ -576,23 +799,26 @@ detect_network_and_push_status() {
 }
 
 probe_bbr_capability_summary() {
-    local kver avail_cc
+    local kver avail_cc cur_cc
     kver="$(uname -r)"
     if [ ! -w /proc/sys/net/ipv4/tcp_congestion_control ] || [ ! -w /proc/sys/net/core/default_qdisc ]; then
         printf '%s' "容器只读/不可写"
         return 0
     fi
+    cur_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
     avail_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-    if grep -qwE 'bbr3?' <<< "$avail_cc"; then
+    if [[ "$cur_cc" == bbr* ]]; then
+        printf '%s' "已实时开启 (${cur_cc})"
+    elif grep -qwE 'bbr3?' <<< "$avail_cc"; then
         if is_builtin_mod tcp_bbr; then
-            printf '%s' "已内置可用"
+            printf '%s' "已内置 (未开启)"
         else
-            printf '%s' "模块已加载可用"
+            printf '%s' "模块已加载 (未开启)"
         fi
     elif is_loadable_mod tcp_bbr; then
-        printf '%s' "已编译为模块 (待加载)"
+        printf '%s' "已编译为模块 (待开启)"
     else
-        printf '%s' "当前内核(${kver})未编译"
+        printf '%s' "未编译 (${kver})"
     fi
 }
 
@@ -685,14 +911,19 @@ format_dns_lines() {
 }
 
 print_detection_summary() {
-    local disk_info bbr_stat host_now push_stat mem_note=""
+    local disk_info bbr_stat host_now mem_note="" dns_push_str="" host_push_str=""
     disk_info="$(df -Ph / 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s)", $3, $2, $5}')"
     host_now="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)"
     bbr_stat="$(probe_bbr_capability_summary)"
-    if [ "${#DHCP_PUSH_REASONS[@]}" -gt 0 ]; then
-        push_stat="${C_BYLW}有下发风险 (${#DHCP_PUSH_REASONS[@]}项)${C_RST}"
+    if [ "${#DNS_PUSH_SOURCES[@]}" -gt 0 ]; then
+        dns_push_str="${C_BYLW}有 (${DNS_PUSH_SOURCES[*]})${C_RST}"
     else
-        push_stat="${C_GRN}静态受控${C_RST}"
+        dns_push_str="${C_GRN}静态受控${C_RST}"
+    fi
+    if [ "${#HOST_PUSH_SOURCES[@]}" -gt 0 ]; then
+        host_push_str="${C_BYLW}有 (${HOST_PUSH_SOURCES[*]})${C_RST}"
+    else
+        host_push_str="${C_GRN}静态受控${C_RST}"
     fi
     if [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt 1024 ] && [ "$SWAP_MB" -eq 0 ] && [ "$IS_CONTAINER" -eq 0 ]; then
         mem_note=" ${C_BYLW}(无Swap)${C_RST}"
@@ -711,7 +942,8 @@ print_detection_summary() {
     echo -e "  ${C_DIM}磁盘:${C_RST} ${disk_info}"
     echo -e "  ${C_DIM}网管:${C_RST} ${NET_MANAGERS[*]}"
     format_dns_lines
-    echo -e "  ${C_DIM}状态:${C_RST} ${push_stat}"
+    echo -e "  ${C_DIM}DNS下发:${C_RST} ${dns_push_str}"
+    echo -e "  ${C_DIM}主机下发:${C_RST} ${host_push_str}"
     echo -e "  ${C_DIM}BBR :${C_RST} ${bbr_stat}"
     echo -e "  ${C_DIM}参数:${C_RST} ${SYSCTL_TARGET}"
     hr
@@ -758,7 +990,7 @@ patch_dhclient_conf() {
     tmp_f="$(mktemp "${TMP_WORK}/dhc.XXXXXX")"
 
     awk '
-        BEGIN { in_req = 0; req_buf = "" }
+        BEGIN { in_req = 0; req_buf = ""; indent = "" }
         function flush_req(    s, n, arr, i, tok, out) {
             s = req_buf
             sub(/^[[:space:]]*request[[:space:]]*/, "", s)
@@ -773,22 +1005,30 @@ patch_dhclient_conf() {
                     tok == "dhcp6.name-servers" || tok == "dhcp6.domain-search") continue
                 out = (out == "" ? tok : out ", " tok)
             }
-            if (out != "") print "request " out ";"
+            if (out != "") print indent "request " out ";"
             in_req = 0
             req_buf = ""
+            indent = ""
         }
-        /^[[:space:]]*request([[:space:]]|$)/ && !in_req {
-            in_req = 1
-            req_buf = $0
-            if (req_buf ~ /;[[:space:]]*$/) flush_req()
-            next
+        {
+            line = $0
+            if (in_req) {
+                sub(/[[:space:]]*#.*/, "", line)
+                req_buf = req_buf " " line
+                if (req_buf ~ /;[[:space:]]*$/) flush_req()
+                next
+            }
+            if (line ~ /^[[:space:]]*request([[:space:]]|$)/) {
+                match(line, /^[[:space:]]*/)
+                indent = substr(line, RSTART, RLENGTH)
+                sub(/[[:space:]]*#.*/, "", line)
+                in_req = 1
+                req_buf = line
+                if (req_buf ~ /;[[:space:]]*$/) flush_req()
+                next
+            }
+            print $0
         }
-        in_req {
-            req_buf = req_buf " " $0
-            if ($0 ~ /;[[:space:]]*$/) flush_req()
-            next
-        }
-        { print }
         END {
             if (in_req) flush_req()
         }
@@ -799,15 +1039,20 @@ patch_dhclient_conf() {
 
 patch_netplan_yaml() {
     local file="$1"
+    local mode="${2:-full}"
     [ -f "$file" ] || return 1
     command -v python3 >/dev/null 2>&1 || return 1
     python3 -c 'import yaml' >/dev/null 2>&1 || return 1
 
-    local changed=0
-    python3 - "$file" <<'PYEOF'
+    local dns_csv=""
+    dns_csv="$(IFS=,; printf '%s' "${DNS_ORDER[*]}")"
+
+    python3 - "$file" "$dns_csv" "$mode" <<'PYEOF'
 import sys, yaml
 
-path = sys.argv[1]
+path, dns_csv, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+dns_addrs = [x for x in dns_csv.split(',') if x]
+
 with open(path, 'r', encoding='utf-8') as f:
     data = yaml.safe_load(f) or {}
 
@@ -820,21 +1065,28 @@ for sec in ('ethernets', 'wifis'):
     devs = net.get(sec)
     if not isinstance(devs, dict):
         continue
-    for name, cfg in devs.items():
+    for _, cfg in devs.items():
         if not isinstance(cfg, dict):
             continue
         has4 = str(cfg.get('dhcp4', '')).lower() in ('true', 'yes', '1')
         has6 = str(cfg.get('dhcp6', '')).lower() in ('true', 'yes', '1')
+        has_ra = str(cfg.get('accept-ra', '')).lower() in ('true', 'yes', '1')
+        if not (has4 or has6 or has_ra):
+            continue
         if has4:
             ov = cfg.setdefault('dhcp4-overrides', {})
-            if ov.get('use-dns') is not False or ov.get('use-hostname') is not False:
+            if ov.get('use-dns') is not False:
                 ov['use-dns'] = False
+                changed = True
+            if mode == 'full' and ov.get('use-hostname') is not False:
                 ov['use-hostname'] = False
                 changed = True
-        if has6:
+        if has6 or has_ra:
             ov6 = cfg.setdefault('dhcp6-overrides', {})
-            if ov6.get('use-dns') is not False or ov6.get('use-hostname') is not False:
+            if ov6.get('use-dns') is not False:
                 ov6['use-dns'] = False
+                changed = True
+            if has6 and mode == 'full' and ov6.get('use-hostname') is not False:
                 ov6['use-hostname'] = False
                 changed = True
         if has4 and has6:
@@ -844,6 +1096,10 @@ for sec in ('ethernets', 'wifis'):
                 if ov6.get(k) != v:
                     ov6[k] = v
                     changed = True
+        ns = cfg.setdefault('nameservers', {})
+        if ns.get('addresses') != dns_addrs:
+            ns['addresses'] = dns_addrs
+            changed = True
 
 if not changed:
     sys.exit(2)
@@ -881,21 +1137,47 @@ patch_cloud_cfg() {
     tmp_f="$(mktemp "${TMP_WORK}/cloud.XXXXXX")"
 
     awk '
-        BEGIN { seen = 0 }
+        BEGIN { seen_p = 0; seen_d = 0 }
         /^[[:space:]]*preserve_hostname:[[:space:]]*/ {
-            if (!seen) {
+            if (!seen_p) {
                 print "preserve_hostname: true"
-                seen = 1
+                seen_p = 1
+            }
+            next
+        }
+        /^[[:space:]]*manage_resolv_conf:[[:space:]]*/ {
+            if (!seen_d) {
+                print "manage_resolv_conf: false"
+                seen_d = 1
             }
             next
         }
         { print }
         END {
-            if (!seen) print "preserve_hostname: true"
+            if (!seen_p) print "preserve_hostname: true"
         }
     ' "$file" > "$tmp_f"
 
     atomic_replace_if_changed "$tmp_f" "$file" 0644
+    local main_rc=$?
+
+    local cf="" drop_rc=1
+    for cf in /etc/cloud/cloud.cfg.d/*.cfg; do
+        [ -f "$cf" ] || continue
+        if grep -qE '^[[:space:]]*(preserve_hostname|manage_resolv_conf):' "$cf" 2>/dev/null; then
+            tmp_f="$(mktemp "${TMP_WORK}/cloudd.XXXXXX")"
+            awk '
+                /^[[:space:]]*preserve_hostname:[[:space:]]*/ { print "preserve_hostname: true"; next }
+                /^[[:space:]]*manage_resolv_conf:[[:space:]]*/ { print "manage_resolv_conf: false"; next }
+                { print }
+            ' "$cf" > "$tmp_f"
+            if atomic_replace_if_changed "$tmp_f" "$cf" 0644; then
+                drop_rc=0
+            fi
+        fi
+    done
+
+    [ "$main_rc" -eq 0 ] || [ "$drop_rc" -eq 0 ]
 }
 
 ensure_hosts_entry() {
@@ -914,6 +1196,19 @@ ensure_hosts_entry() {
             ok "已补全 /etc/hosts 本机映射"
         fi
     fi
+}
+
+wait_default_route_ready() {
+    [ "$IS_CONTAINER" -eq 1 ] && return 0
+    local i=0
+    while [ "$i" -lt 6 ]; do
+        if ip -4 route show default 2>/dev/null | grep -q . || ip -6 route show default 2>/dev/null | grep -q .; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
 }
 
 test_dns_resolution() {
@@ -955,58 +1250,121 @@ write_static_resolv_conf() {
 step_dns_and_anti_dhcp() {
     step_title "1/7" "检测并锁定 DNS 与主机名"
 
+    ensure_tmp_work
+    local net_bak_dir="${TMP_WORK}/net_bak"
+    mkdir -p "$net_bak_dir"
+
+    local resolv_bak="${net_bak_dir}/resolv.conf.bak"
+    local resolv_link=""
+    if [ -L /etc/resolv.conf ]; then
+        resolv_link="$(readlink /etc/resolv.conf 2>/dev/null || true)"
+    fi
+    if [ -e /etc/resolv.conf ]; then
+        cp -L /etc/resolv.conf "$resolv_bak" 2>/dev/null || true
+    fi
+
+    local had_default_route=0
+    if ip -4 route show default 2>/dev/null | grep -q . || ip -6 route show default 2>/dev/null | grep -q .; then
+        had_default_route=1
+    fi
+
     local netplan_changed=0
     local networkd_changed=0
     local resolved_was_active=0
 
     if [ -f /etc/dhcpcd.conf ]; then
+        cp -p /etc/dhcpcd.conf "${net_bak_dir}/dhcpcd.conf.bak" 2>/dev/null || true
         if patch_dhcpcd_conf /etc/dhcpcd.conf; then
             ok "dhcpcd 已阻止下发 DNS 与主机名"
         fi
     fi
 
     if [ -f /etc/dhcp/dhclient.conf ]; then
+        cp -p /etc/dhcp/dhclient.conf "${net_bak_dir}/dhclient.conf.bak" 2>/dev/null || true
         if patch_dhclient_conf /etc/dhcp/dhclient.conf; then
             ok "dhclient 已移除 DNS 与主机名请求"
         fi
     fi
 
-    local yf=""
-    for yf in /etc/netplan/*.yaml; do
-        [ -f "$yf" ] || continue
-        if patch_netplan_yaml "$yf"; then
-            ok "Netplan 已关闭 DHCP DNS/主机名: $(basename "$yf")"
-            netplan_changed=1
+    if [ "$NETPLAN_ACTIVE" -eq 1 ]; then
+        mkdir -p "${net_bak_dir}/netplan"
+        local yf="" yname=""
+        for yf in /etc/netplan/*.yaml; do
+            [ -f "$yf" ] || continue
+            yname="$(basename "$yf")"
+            cp -p "$yf" "${net_bak_dir}/netplan/${yname}" 2>/dev/null || true
+            if patch_netplan_yaml "$yf" "full"; then
+                if command -v netplan >/dev/null 2>&1 && ! netplan generate >/dev/null 2>&1; then
+                    cp -p "${net_bak_dir}/netplan/${yname}" "$yf" 2>/dev/null || true
+                    if patch_netplan_yaml "$yf" "dns_only" && netplan generate >/dev/null 2>&1; then
+                        netplan_changed=1
+                        ok "Netplan 已锁定 DNS (${yname})"
+                    else
+                        cp -p "${net_bak_dir}/netplan/${yname}" "$yf" 2>/dev/null || true
+                        warn "Netplan 校验未通过，跳过修改 ${yname}"
+                    fi
+                else
+                    netplan_changed=1
+                    ok "Netplan 已锁定 DNS 与主机名 (${yname})"
+                fi
+            fi
+        done
+        if [ "$netplan_changed" -eq 1 ] && [ "$IS_CONTAINER" -eq 0 ] && command -v netplan >/dev/null 2>&1; then
+            netplan apply >/dev/null 2>&1 || true
+            wait_default_route_ready || true
         fi
-    done
-    if [ "$netplan_changed" -eq 1 ] && [ "$IS_CONTAINER" -eq 0 ] && command -v netplan >/dev/null 2>&1; then
-        netplan apply >/dev/null 2>&1 || true
     fi
 
-    local nf=""
-    for nf in /etc/systemd/network/*.network; do
-        [ -f "$nf" ] || continue
-        if patch_systemd_network_file "$nf"; then
-            ok "networkd 已阻止下发: $(basename "$nf")"
-            networkd_changed=1
+    if compgen -G "/etc/systemd/network/*.network" >/dev/null 2>&1; then
+        mkdir -p "${net_bak_dir}/network"
+        local nf="" nname=""
+        for nf in /etc/systemd/network/*.network; do
+            [ -f "$nf" ] || continue
+            nname="$(basename "$nf")"
+            cp -p "$nf" "${net_bak_dir}/network/${nname}" 2>/dev/null || true
+            if patch_systemd_network_file "$nf"; then
+                ok "networkd 已阻止下发 (${nname})"
+                networkd_changed=1
+            fi
+        done
+        if [ "$networkd_changed" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl reload systemd-networkd >/dev/null 2>&1 || true
+            wait_default_route_ready || true
         fi
-    done
-    if [ "$networkd_changed" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
-        systemctl reload systemd-networkd >/dev/null 2>&1 || true
     fi
 
     if [ -f /etc/cloud/cloud.cfg ]; then
         if patch_cloud_cfg /etc/cloud/cloud.cfg; then
-            ok "cloud-init 已开启 preserve_hostname"
+            ok "cloud-init 已锁定 preserve_hostname"
         fi
     fi
 
-    if [ -f /etc/NetworkManager/NetworkManager.conf ] && [ "$HAS_SYSTEMD" -eq 1 ] && \
-       systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    if [ -f /etc/waagent.conf ] && grep -qE '^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=[[:space:]]*y' /etc/waagent.conf 2>/dev/null; then
+        sed -i -E 's/^[[:space:]]*Provisioning\.MonitorHostName[[:space:]]*=.*/Provisioning.MonitorHostName=n/' /etc/waagent.conf
+        ok "waagent 已关闭主机名覆写"
+    fi
+
+    if [ "$RDNSSD_ACTIVE" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
+        systemctl disable --now rdnssd >/dev/null 2>&1 || true
+        ok "已停用 rdnssd (IPv6 RA DNS)"
+    fi
+
+    if [ "$RESOLVCONF_ACTIVE" -eq 1 ] && command -v resolvconf >/dev/null 2>&1; then
+        resolvconf --disable-updates >/dev/null 2>&1 || true
+        ok "已停止 resolvconf 自动覆盖"
+    fi
+
+    if [ "$NM_ACTIVE" -eq 1 ] && [ -f /etc/NetworkManager/NetworkManager.conf ]; then
         if upsert_ini_section /etc/NetworkManager/NetworkManager.conf "[main]" "dns=none"; then
             systemctl reload NetworkManager >/dev/null 2>&1 || true
-            ok "NetworkManager 已禁用自动写 DNS"
+            ok "NetworkManager 已禁用写 resolv.conf"
         fi
+    fi
+
+    if [ -f /etc/systemd/resolved.conf ]; then
+        local r_dns=""
+        r_dns="${DNS_ORDER[*]}"
+        upsert_ini_section /etc/systemd/resolved.conf "[Resolve]" "DNS=${r_dns}" "FallbackDNS=" "MulticastDNS=no" >/dev/null 2>&1 || true
     fi
 
     if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
@@ -1017,26 +1375,50 @@ step_dns_and_anti_dhcp() {
 
     ensure_hosts_entry
 
-    local resolv_bak=""
-    ensure_tmp_work
-    resolv_bak="${TMP_WORK}/resolv.conf.bak"
-    if [ -e /etc/resolv.conf ]; then
-        cp -a /etc/resolv.conf "$resolv_bak" 2>/dev/null || true
+    local resolv_written=0
+    if write_static_resolv_conf; then
+        resolv_written=1
     fi
 
-    if write_static_resolv_conf; then
-        if test_dns_resolution; then
-            ok "静态 DNS 已写入并验证可用"
-        else
-            warn "新 DNS 解析超时，还原原配置以保证升级"
-            rm -f /etc/resolv.conf 2>/dev/null || true
-            if [ -e "$resolv_bak" ]; then
-                cp -a "$resolv_bak" /etc/resolv.conf 2>/dev/null || true
-            fi
-            if [ "$resolved_was_active" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
-                systemctl enable --now systemd-resolved >/dev/null 2>&1 || true
+    local net_ok=1
+    if [ "$had_default_route" -eq 1 ] && ! wait_default_route_ready; then
+        net_ok=0
+    fi
+    if [ "$net_ok" -eq 1 ] && ! test_dns_resolution; then
+        net_ok=0
+    fi
+
+    if [ "$net_ok" -eq 0 ]; then
+        warn "检测到网络或解析异常，正在自动回滚网络配置"
+        if [ -f "${net_bak_dir}/dhcpcd.conf.bak" ]; then
+            cp -p "${net_bak_dir}/dhcpcd.conf.bak" /etc/dhcpcd.conf 2>/dev/null || true
+        fi
+        if [ -f "${net_bak_dir}/dhclient.conf.bak" ]; then
+            cp -p "${net_bak_dir}/dhclient.conf.bak" /etc/dhcp/dhclient.conf 2>/dev/null || true
+        fi
+        if [ -d "${net_bak_dir}/netplan" ]; then
+            cp -p "${net_bak_dir}/netplan/"*.yaml /etc/netplan/ 2>/dev/null || true
+            if [ "$netplan_changed" -eq 1 ] && [ "$IS_CONTAINER" -eq 0 ] && command -v netplan >/dev/null 2>&1; then
+                netplan apply >/dev/null 2>&1 || true
             fi
         fi
+        if [ -d "${net_bak_dir}/network" ]; then
+            cp -p "${net_bak_dir}/network/"*.network /etc/systemd/network/ 2>/dev/null || true
+            if [ "$networkd_changed" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
+                systemctl reload systemd-networkd >/dev/null 2>&1 || true
+            fi
+        fi
+        rm -f /etc/resolv.conf 2>/dev/null || true
+        if [ -n "$resolv_link" ]; then
+            ln -sf "$resolv_link" /etc/resolv.conf 2>/dev/null || true
+        elif [ -e "$resolv_bak" ]; then
+            cp -p "$resolv_bak" /etc/resolv.conf 2>/dev/null || true
+        fi
+        if [ "$resolved_was_active" -eq 1 ] && [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl enable --now systemd-resolved >/dev/null 2>&1 || true
+        fi
+    elif [ "$resolv_written" -eq 1 ]; then
+        ok "静态 DNS 已写入并验证可用"
     else
         ok "DNS 与防下发策略均已就绪"
     fi
@@ -1059,6 +1441,160 @@ step_apt_dpkg_slimming() {
         ok "已更新 /etc/apt/apt.conf"
     else
         ok "/etc/apt/apt.conf 无变化"
+    fi
+}
+
+pin_critical_packages() {
+    local -a critical_pkgs=(
+        openssh-server openssh-client netplan.io netplan-generator ifupdown
+        dhcpcd-base dhcpcd5 isc-dhcp-client isc-dhcp-common
+        systemd-resolved resolvconf openresolv
+        iproute2 iputils-ping netbase nftables iptables ethtool
+        ca-certificates curl wget gnupg sudo udev systemd kmod
+        initramfs-tools cloud-init python3-yaml linux-base linux-sysctl-defaults
+        efibootmgr amazon-ec2-net-utils google-guest-agent walinuxagent
+    )
+    local -a to_pin=()
+    local p=""
+    for p in "${critical_pkgs[@]}"; do
+        if is_pkg_installed "$p"; then
+            to_pin+=("$p")
+        fi
+    done
+    while IFS= read -r p; do
+        [ -n "$p" ] && to_pin+=("$p")
+    done < <(dpkg-query -W -f='${Status}\t${Package}\n' 'grub*' 'linux-firmware*' 'libnetplan*' 2>/dev/null | awk -F'\t' '$1=="install ok installed"{print $2}' || true)
+
+    if [ "${#to_pin[@]}" -gt 0 ]; then
+        apt-mark manual "${to_pin[@]}" >/dev/null 2>&1 || true
+    fi
+}
+
+filter_safe_purge_pkgs() {
+    local out_arr_name="$1"
+    shift
+    local -a raw_pkgs=("$@")
+    local -n out_ref="$out_arr_name"
+    out_ref=()
+
+    local protected_rx='^(openssh-server|openssh-client|netplan\.io|netplan-generator|libnetplan.*|ifupdown|dhcpcd-base|dhcpcd5|isc-dhcp-client|isc-dhcp-common|systemd-resolved|iproute2|iputils-ping|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs-tools|cloud-init|grub.*|efibootmgr|amazon-ec2-net-utils|google-guest-agent|walinuxagent)$'
+    local p="" sim_out=""
+    for p in "${raw_pkgs[@]}"; do
+        [ -z "$p" ] && continue
+        is_pkg_installed "$p" || continue
+        if ! sim_out="$(apt-get purge -s --no-install-recommends "$p" 2>&1)"; then
+            warn "跳过卸载 ${p} (模拟依赖校验未通过)"
+            continue
+        fi
+        if grep -E '^(Purg|Remv) ' <<< "$sim_out" | awk '{print $2}' | grep -qE "$protected_rx"; then
+            warn "跳过卸载 ${p} (会连带移除关键网络/系统组件)"
+            continue
+        fi
+        out_ref+=("$p")
+    done
+}
+
+strip_cron_pattern() {
+    local pat="$1"
+    local f="" tmp_f=""
+    ensure_tmp_work
+    for f in /etc/crontab /etc/cron.d/* /var/spool/cron/crontabs/*; do
+        [ -f "$f" ] || continue
+        if grep -qE "$pat" "$f" 2>/dev/null; then
+            tmp_f="$(mktemp "${TMP_WORK}/cron.XXXXXX")"
+            grep -vE "$pat" "$f" > "$tmp_f" || true
+            atomic_replace_if_changed "$tmp_f" "$f" 0600 || true
+        fi
+    done
+}
+
+step_provider_agent_prune() {
+    local found=0
+
+    if [ -f /etc/init.d/aegis ] || [ -d /usr/local/aegis ] || [ -d /usr/local/cloudmonitor ] || \
+       [ -d /usr/local/share/aliyun-assist ] || is_pkg_installed aliyun-assist || is_pkg_installed aliyun_assist; then
+        found=1
+        if [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl disable --now aliyun.service CmsGoAgent.service aegis.service cloudmonitor.service >/dev/null 2>&1 || true
+        fi
+        if [ -x /etc/init.d/aegis ]; then
+            /etc/init.d/aegis stop >/dev/null 2>&1 || true
+            /etc/init.d/aegis uninstall >/dev/null 2>&1 || true
+        fi
+        pkill -9 -f 'AliYunDun|AliHids|aliyun-service|CmsGoAgent|cloudmonitor' >/dev/null 2>&1 || true
+        rm -rf /usr/local/aegis /usr/local/cloudmonitor /usr/local/share/aliyun-assist \
+               /usr/sbin/aliyun_installer /usr/sbin/aliyun-service \
+               /etc/systemd/system/aliyun.service /etc/systemd/system/CmsGoAgent.service \
+               /etc/systemd/system/cloudmonitor.service /etc/init.d/aegis 2>/dev/null || true
+        strip_cron_pattern 'aegis|aliyun|cloudmonitor'
+        ok "已清理阿里云监控/助手服务"
+    fi
+
+    if [ -d /usr/local/qcloud ] || [ -f /etc/cron.d/sgagenttask ] || \
+       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-unit-files 'tat_agent*' --no-legend 2>/dev/null | grep -q .; }; then
+        found=1
+        local sh_u=""
+        for sh_u in /usr/local/qcloud/stargate/admin/uninstall.sh \
+                    /usr/local/qcloud/YunJing/uninst.sh \
+                    /usr/local/qcloud/monitor/barad/admin/uninstall.sh; do
+            if [ -x "$sh_u" ]; then
+                bash "$sh_u" >/dev/null 2>&1 || true
+            fi
+        done
+        if [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl disable --now tat_agent.service tat_agent_service.service stargate.service barad_agent.service >/dev/null 2>&1 || true
+        fi
+        pkill -9 -f 'tat_agent|secu-tcs-agent|sgagent|barad_agent|YDService|YDLive|ydservice' >/dev/null 2>&1 || true
+        rm -rf /usr/local/qcloud /etc/cron.d/sgagenttask \
+               /etc/systemd/system/tat_agent.service /etc/systemd/system/tat_agent_service.service 2>/dev/null || true
+        strip_cron_pattern 'qcloud|stargate|sgagent|barad|tat_agent'
+        ok "已清理腾讯云监控/TAT助手"
+    fi
+
+    if [ -d /usr/local/telescope ] || [ -d /usr/local/hostguard ] || [ -d /usr/local/uniagent ] || \
+       [ -f /etc/init.d/hostguard ] || is_pkg_installed hostguard; then
+        found=1
+        if [ -x /usr/local/telescope/uninstall.sh ]; then
+            bash /usr/local/telescope/uninstall.sh >/dev/null 2>&1 || true
+        fi
+        if [ -x /etc/init.d/hostguard ]; then
+            /etc/init.d/hostguard stop >/dev/null 2>&1 || true
+        fi
+        if [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl disable --now uniagent.service telescoped.service hostguard.service >/dev/null 2>&1 || true
+        fi
+        pkill -9 -f 'telescope|hostguard|uniagent' >/dev/null 2>&1 || true
+        if is_pkg_installed hostguard; then
+            apt-get purge -y hostguard >/dev/null 2>&1 || true
+        fi
+        rm -rf /usr/local/telescope /usr/local/hostguard /usr/local/uniagent /etc/init.d/hostguard 2>/dev/null || true
+        ok "已清理华为云监控/主机安全代理"
+    fi
+
+    if [ -d /opt/ucloud/uagent ] || [ -d /usr/lib/ucloud/uagent ] || [ -d /usr/local/cloud-monitor ] || \
+       [ -d /opt/linode/longview ] || \
+       { [ "$HAS_SYSTEMD" -eq 1 ] && systemctl list-unit-files cloud-monitor-agent.service uagent.service bce-agent.service --no-legend 2>/dev/null | grep -q .; }; then
+        found=1
+        if [ "$HAS_SYSTEMD" -eq 1 ]; then
+            systemctl disable --now cloud-monitor-agent.service uagent.service bce-agent.service >/dev/null 2>&1 || true
+        fi
+        rm -rf /opt/ucloud/uagent /usr/lib/ucloud/uagent /usr/local/cloud-monitor /opt/linode/longview 2>/dev/null || true
+        ok "已清理其它云监控代理"
+    fi
+
+    if command -v snap >/dev/null 2>&1; then
+        local sp=""
+        for sp in amazon-ssm-agent oracle-cloud-agent; do
+            if snap list "$sp" >/dev/null 2>&1; then
+                if snap remove --purge "$sp" >/dev/null 2>&1; then
+                    found=1
+                fi
+            fi
+        done
+    fi
+
+    if [ "$found" -eq 0 ]; then
+        ok "未检测到厂家常驻监控代理"
     fi
 }
 
@@ -1159,11 +1695,10 @@ prune_old_kernels() {
 }
 
 step_pkg_prune_and_upgrade() {
-    step_title "3/7" "精简冗余包、全局升级与内核清理"
+    step_title "3/7" "移除监控、精简包与全局升级"
 
-    if is_pkg_installed openssh-server; then
-        apt-mark manual openssh-server >/dev/null 2>&1 || true
-    fi
+    pin_critical_packages
+    step_provider_agent_prune
 
     local -a rc_pkgs=()
     mapfile -t rc_pkgs < <(dpkg -l 2>/dev/null | awk '/^rc/ {print $2}')
@@ -1171,7 +1706,7 @@ step_pkg_prune_and_upgrade() {
         run_logged "清理 ${#rc_pkgs[@]} 个 rc 残留包" apt-get purge -y -q "${rc_pkgs[@]}" || true
     fi
 
-    local -a candidates=(
+    local -a raw_candidates=(
         man-db manpages manpages-dev groff-base info install-info
         dictionaries-common emacsen-common ispell iamerican ibritish
         ienglish-common wamerican installation-report popularity-contest
@@ -1180,35 +1715,37 @@ step_pkg_prune_and_upgrade() {
         bluez cups cups-browsed cups-common cups-client cups-daemon
         avahi-daemon modemmanager wpasupplicant
         rpcbind nfs-common exim4 exim4-base exim4-config exim4-daemon-light
-        qemu-utils
+        qemu-utils qemu-guest-agent xe-guest-utilities hyperv-daemons open-vm-tools
+        do-agent droplet-agent oracle-cloud-agent
+        amazon-ssm-agent amazon-cloudwatch-agent
+        google-cloud-ops-agent stackdriver-agent google-osconfig-agent
+        azuremonitoragent omsagent linode-longview
+        aliyun-assist aliyun_assist
     )
     if [ "$OS_ID" = "ubuntu" ]; then
-        candidates+=(
-            snapd apport whoopsie landscape-common
+        raw_candidates+=(
+            snapd apport whoopsie ubuntu-report landscape-common
             ubuntu-pro-client ubuntu-advantage-tools
             fwupd multipath-tools motd-news-config
         )
     fi
 
-    local -a to_purge=()
     local pkg=""
-    for pkg in "${candidates[@]}"; do
-        if is_pkg_installed "$pkg"; then
-            to_purge+=("$pkg")
-        fi
-    done
     while IFS= read -r pkg; do
-        [ -n "$pkg" ] && to_purge+=("$pkg")
+        [ -n "$pkg" ] && raw_candidates+=("$pkg")
     done < <(dpkg-query -W -f='${Status}\t${Package}\n' 'qemu-system*' 'plymouth*' 2>/dev/null | awk -F'\t' '$1=="install ok installed"{print $2}' || true)
 
+    local -a to_purge=()
+    filter_safe_purge_pkgs to_purge "${raw_candidates[@]}"
+
     if [ "${#to_purge[@]}" -gt 0 ]; then
-        if [ "$OS_ID" = "ubuntu" ] && is_pkg_installed snapd && command -v snap >/dev/null 2>&1; then
+        if [ "$OS_ID" = "ubuntu" ] && printf '%s\n' "${to_purge[@]}" | grep -qx 'snapd' && command -v snap >/dev/null 2>&1; then
             local s=""
             for s in $(snap list 2>/dev/null | awk 'NR>1 {print $1}' | grep -vE '^(bare|core|snapd)$' || true); do
                 snap remove --purge "$s" >/dev/null 2>&1 || true
             done
         fi
-        run_logged "卸载 ${#to_purge[@]} 个冗余软件包" apt-get purge -y --no-install-recommends "${to_purge[@]}" || true
+        run_logged "卸载 ${#to_purge[@]} 个冗余与监控软件包" apt-get purge -y --no-install-recommends "${to_purge[@]}" || true
         if [ "$OS_ID" = "ubuntu" ] && ! is_pkg_installed snapd; then
             rm -rf /var/cache/snapd /root/snap /home/*/snap 2>/dev/null || true
         fi
@@ -1220,6 +1757,15 @@ step_pkg_prune_and_upgrade() {
     run_logged "执行系统全局升级" apt-get full-upgrade -y -q \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" || true
+
+    if [ -L /etc/resolv.conf ] || { [ -f /etc/resolv.conf ] && ! grep -qF "${DNS_ORDER[0]}" /etc/resolv.conf 2>/dev/null; }; then
+        if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+            systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
+        fi
+        if write_static_resolv_conf && test_dns_resolution; then
+            ok "升级后已复核锁定静态 DNS"
+        fi
+    fi
 
     prune_old_kernels
 
@@ -1243,7 +1789,7 @@ step_pkg_prune_and_upgrade() {
 }
 
 step_service_prune() {
-    step_title "4/7" "禁用冗余系统服务与定时任务"
+    step_title "4/7" "禁用冗余与遥测服务/定时器"
     if [ "$HAS_SYSTEMD" -eq 0 ]; then
         info "无 systemd 运行环境，跳过服务禁用"
         return 0
@@ -1262,7 +1808,13 @@ step_service_prune() {
         snapd.service snapd.socket snapd.seeded.service
         apport.service whoopsie.service fwupd.service
         multipathd.service multipathd.socket
-        motd-news.timer
+        motd-news.timer ua-timer.timer ubuntu-advantage.service
+        qemu-guest-agent.service
+        do-agent.service droplet-agent.service
+        oracle-cloud-agent.service
+        amazon-ssm-agent.service amazon-cloudwatch-agent.service
+        google-cloud-ops-agent.service stackdriver-agent.service google-osconfig-agent.service
+        rdnssd.service
     )
 
     local disabled_cnt=0
@@ -1274,7 +1826,7 @@ step_service_prune() {
     done
 
     if [ "$disabled_cnt" -gt 0 ]; then
-        ok "已禁用 ${disabled_cnt} 个冗余服务/定时器"
+        ok "已禁用 ${disabled_cnt} 个冗余/监控服务"
     else
         ok "无额外待禁用服务/定时器"
     fi
@@ -1310,6 +1862,15 @@ configure_bbr_fq() {
         fi
     fi
 
+    local def_dev="" cur_root_qdisc=""
+    def_dev="$(get_default_net_iface)"
+    if [ -n "$def_dev" ] && [ -n "$chosen_qdisc" ] && command -v tc >/dev/null 2>&1; then
+        cur_root_qdisc="$(tc qdisc show dev "$def_dev" 2>/dev/null | awk '/root/{print $2; exit}')"
+        if [ -n "$cur_root_qdisc" ] && [ "$cur_root_qdisc" != "$chosen_qdisc" ] && [ "$cur_root_qdisc" != "mq" ]; then
+            tc qdisc replace dev "$def_dev" root "$chosen_qdisc" >/dev/null 2>&1 || true
+        fi
+    fi
+
     local avail_cc=""
     avail_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
     if ! grep -qwE 'bbr3?' <<< "$avail_cc"; then
@@ -1336,51 +1897,15 @@ configure_bbr_fq() {
             upsert_sysctl_kv "$SYSCTL_TARGET" "net.core.default_qdisc" "$chosen_qdisc" || true
         fi
         upsert_sysctl_kv "$SYSCTL_TARGET" "net.ipv4.tcp_congestion_control" "$chosen_cc" || true
-        ok "已启用 ${chosen_cc} + ${chosen_qdisc:-default}"
+        ok "BBR 已实时开启 (${chosen_cc}) · 默认队列 ${chosen_qdisc:-default}"
     else
         remove_module_line "$MODULES_TARGET" "tcp_bbr" || true
         if [ -n "$chosen_qdisc" ]; then
             upsert_sysctl_kv "$SYSCTL_TARGET" "net.core.default_qdisc" "$chosen_qdisc" || true
         fi
         delete_sysctl_kv "$SYSCTL_TARGET" "net.ipv4.tcp_congestion_control" || true
-        warn "内核 $(uname -r) 未编译 BBR，已保留现有算法"
+        warn "内核 $(uname -r) 未编译 BBR，已保持现有拥塞算法"
     fi
-}
-
-upsert_sysctl_min_kv() {
-    local file="$1"
-    local key="$2"
-    local min_val="$3"
-    local cur_live="" cur_cfg=""
-    cur_live="$(sysctl -n "$key" 2>/dev/null || true)"
-    if [ -f "$file" ]; then
-        cur_cfg="$(awk -v tkey="$key" '
-            {
-                raw = $0; sub(/^[[:space:]]+/, "", raw)
-                if (raw ~ /^[#;]/) next
-                eq = index(raw, "=")
-                if (eq > 0) {
-                    k = substr(raw, 1, eq - 1); sub(/[[:space:]]+$/, "", k); gsub(/\//, ".", k)
-                    if (k == tkey) {
-                        v = substr(raw, eq + 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
-                        val = v
-                    }
-                }
-            }
-            END { print val }
-        ' "$file")"
-    fi
-    if [ -n "$cur_cfg" ]; then
-        if [[ "$cur_cfg" =~ ^[0-9]+$ ]] && [ "$cur_cfg" -ge "$min_val" ]; then
-            return 1
-        fi
-        upsert_sysctl_kv "$file" "$key" "$min_val"
-        return $?
-    fi
-    if [[ "$cur_live" =~ ^[0-9]+$ ]] && [ "$cur_live" -ge "$min_val" ]; then
-        return 1
-    fi
-    upsert_sysctl_kv "$file" "$key" "$min_val"
 }
 
 apply_sysctl_optimizations() {
@@ -1678,46 +2203,99 @@ step_system_optimize() {
 }
 
 step_deep_cleanup() {
-    step_title "6/7" "收尾清理缓存、日志与包索引"
+    step_title "6/7" "彻底清理备份、日志与垃圾文件"
 
     sync
+    local -a auto_sim=()
+    mapfile -t auto_sim < <(apt-get autoremove -s 2>/dev/null | awk '/^Remv /{print $2}' || true)
+    if [ "${#auto_sim[@]}" -gt 0 ]; then
+        local ap=""
+        for ap in "${auto_sim[@]}"; do
+            if [[ "$ap" =~ ^(openssh-|netplan|ifupdown|dhcpcd|isc-dhcp|iproute2|iputils-|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs|cloud-init|grub|efibootmgr) ]]; then
+                apt-mark manual "$ap" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
     run_logged "清理孤立依赖包" apt-get autoremove --purge -y -q || true
     apt-get clean -qq >/dev/null 2>&1 || true
     find /var/lib/apt/lists -maxdepth 1 -type f -delete 2>/dev/null || true
-    ok "APT 缓存与列表索引已清理"
+    find /var/lib/apt/periodic /var/cache/apt -maxdepth 1 -type f -delete 2>/dev/null || true
+    find /var/cache/debconf /var/lib/dpkg -maxdepth 1 -type f -name '*-old' -delete 2>/dev/null || true
+    find /var/cache/man /var/cache/fontconfig -type f -delete 2>/dev/null || true
+    find /var/backups -type f \( -name '*.gz' -o -name '*.bak' -o -name '*.old' -o -name 'dpkg.*' -o -name 'apt.*' -o -name 'alternatives.*' \) -delete 2>/dev/null || true
+    ok "APT 索引、缓存与系统备份已清理"
 
-    find /etc /var -type f \( -name '*.dpkg-old' -o -name '*.dpkg-dist' -o -name '*.dpkg-new' -o -name '*.ucf-old' -o -name '*.ucf-dist' \) -delete 2>/dev/null || true
-    rm -f /vmlinuz.old /initrd.img.old /boot/vmlinuz.old /boot/initrd.img.old 2>/dev/null || true
-    find /var/crash /var/lib/systemd/coredump /var/tmp -type f -delete 2>/dev/null || true
+    if [ "$IS_CONTAINER" -eq 0 ]; then
+        local cur_k="" mdir="" mver=""
+        cur_k="$(uname -r)"
+        for mdir in /lib/modules/[0-9]*; do
+            [ -d "$mdir" ] || continue
+            mver="$(basename "$mdir")"
+            if [ "$mver" != "$cur_k" ] && [ ! -f "/boot/vmlinuz-${mver}" ]; then
+                rm -rf "$mdir" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    find /etc /var /opt /srv /root /home \
+        -type d \( -name '.git' -o -name '.ssh' -o -path '/var/lib/docker' -o -path '/var/lib/containerd' -o -path '/var/lib/dpkg' -o -path '/var/lib/apt' -o -path '/etc/ssl' \) -prune -o \
+        -type f \( -name '*.dpkg-old' -o -name '*.dpkg-dist' -o -name '*.dpkg-new' \
+        -o -name '*.ucf-old' -o -name '*.ucf-dist' -o -name '*.ucf-new' \
+        -o -name '*.bak' -o -name '*.old' -o -name '*.tmp' \
+        -o -name '*.swp' -o -name '*.swo' -o -name '*~' \
+        -o -name '*.orig' -o -name '*.rej' \) -delete 2>/dev/null || true
+    rm -f /vmlinuz.old /initrd.img.old /boot/vmlinuz.old /boot/initrd.img.old /boot/*.old /boot/*.bak 2>/dev/null || true
+    ok "配置残留与备份文件已清理"
+
+    find /var/crash /var/lib/systemd/coredump /var/lib/apport/coredump -type f -delete 2>/dev/null || true
+    if command -v file >/dev/null 2>&1; then
+        find /var /opt /srv /root /home -type f \( -name 'core' -o -name 'core.[0-9]*' \) -exec sh -c '
+            for f in "$@"; do
+                file "$f" 2>/dev/null | grep -qi "core file" && rm -f "$f" 2>/dev/null || true
+            done
+        ' sh {} + 2>/dev/null || true
+    fi
 
     local self_path=""
     self_path="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+    find /var/tmp -mindepth 1 -type f -delete 2>/dev/null || true
+    find /var/tmp -mindepth 1 -type d -empty -delete 2>/dev/null || true
     if [ -n "$self_path" ] && [ -e "$self_path" ]; then
-        find /tmp -mindepth 1 -maxdepth 2 -type f ! -samefile "$self_path" ! -path "${TMP_WORK:-/nonexistent}/*" -delete 2>/dev/null || true
+        find /tmp -mindepth 1 \
+            \( -path '/tmp/.X11-unix' -o -path '/tmp/.ICE-unix' -o -path '/tmp/.font-unix' -o -path '/tmp/.Test-unix' -o -name 'systemd-private-*' -o -path "${TMP_WORK:-/nonexistent}" \) -prune -o \
+            -type f ! -samefile "$self_path" -delete 2>/dev/null || true
     else
-        find /tmp -mindepth 1 -maxdepth 2 -type f ! -path "${TMP_WORK:-/nonexistent}/*" -delete 2>/dev/null || true
+        find /tmp -mindepth 1 \
+            \( -path '/tmp/.X11-unix' -o -path '/tmp/.ICE-unix' -o -path '/tmp/.font-unix' -o -path '/tmp/.Test-unix' -o -name 'systemd-private-*' -o -path "${TMP_WORK:-/nonexistent}" \) -prune -o \
+            -type f -delete 2>/dev/null || true
     fi
+    find /tmp -mindepth 1 -maxdepth 2 -type d -empty ! -name '.X11-unix' ! -name '.ICE-unix' ! -name '.font-unix' ! -name '.Test-unix' ! -name 'systemd-private-*' ! -path "${TMP_WORK:-/nonexistent}" -delete 2>/dev/null || true
+    ok "临时文件与崩溃转储已清理"
 
     local d=""
     for d in /home/* /root; do
         [ -d "$d" ] || continue
         find "$d/.cache" "$d/.local/share/Trash" -type f -delete 2>/dev/null || true
-        find "$d" -maxdepth 1 -type f \( -name ".bash_history" -o -name ".viminfo" -o -name ".wget-hsts" \) -delete 2>/dev/null || true
+        find "$d" -maxdepth 1 -type f \( -name ".bash_history" -o -name ".zsh_history" -o -name ".python_history" -o -name ".lesshst" -o -name ".viminfo" -o -name ".wget-hsts" \) -delete 2>/dev/null || true
         rm -rf "${d}/.npm/_cacache" "${d}/.m2/repository" "${d}/.gradle/caches" 2>/dev/null || true
     done
 
     if [ "$HAS_SYSTEMD" -eq 1 ] && command -v journalctl >/dev/null 2>&1; then
         journalctl --rotate >/dev/null 2>&1 || true
-        journalctl --vacuum-size=1M >/dev/null 2>&1 || true
+        journalctl --vacuum-time=1s >/dev/null 2>&1 || journalctl --vacuum-size=1M >/dev/null 2>&1 || true
     fi
+    find /var/log/journal -type f -name '*.journal~' -delete 2>/dev/null || true
     if [ -d /var/log ]; then
-        find /var/log -type f \( -name '*.log.*' -o -name '*.gz' -o -name '*.[0-9]' \) -delete 2>/dev/null || true
-        find /var/log -type f -name '*.log' -exec truncate -s 0 {} \; 2>/dev/null || true
+        rm -rf /var/log/installer /var/log/apt/* /var/log/unattended-upgrades/* 2>/dev/null || true
+        find /var/log -path '/var/log/journal' -prune -o \
+            -type f \( -name '*.log.*' -o -name '*.gz' -o -name '*.xz' -o -name '*.bz2' -o -name '*.zst' -o -name '*.old' -o -name '*.[0-9]' -o -name 'cloud-init*.log' \) -delete 2>/dev/null || true
+        find /var/log -path '/var/log/journal' -prune -o \
+            -type f -exec truncate -s 0 {} \; 2>/dev/null || true
     fi
-    ok "系统日志与历史缓存已清理"
+    ok "全部日志与用户历史缓存已清理"
 
     if command -v docker >/dev/null 2>&1; then
-        if docker system prune -a -f >/dev/null 2>&1; then
+        if docker info >/dev/null 2>&1 && docker system prune -a -f >/dev/null 2>&1; then
             ok "Docker 未使用镜像与缓存已清理"
         fi
     fi
@@ -1731,14 +2309,37 @@ step_deep_cleanup() {
 }
 
 print_final_summary() {
-    step_title "7/7" "终态核验"
-    local cc_now="" qdisc_now="" disk_now=""
+    step_title "7/7" "终态实测核验"
+    local cc_now="" qdisc_def="" def_dev="" live_qdisc="" disk_now="" bbr_real="" fq_real=""
     cc_now="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"
-    qdisc_now="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+    qdisc_def="$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"
+    def_dev="$(get_default_net_iface)"
+    live_qdisc="$(get_live_nic_qdisc "$def_dev")"
     disk_now="$(df -Ph / 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s)", $3, $2, $5}')"
 
+    if [[ "$cc_now" == bbr* ]] && { grep -qw tcp_bbr /proc/modules 2>/dev/null || is_builtin_mod tcp_bbr; }; then
+        bbr_real="${C_BGRN}已实时开启 (${cc_now})${C_RST}"
+    elif [[ "$cc_now" == bbr* ]]; then
+        bbr_real="${C_BGRN}已开启 (${cc_now})${C_RST}"
+    else
+        bbr_real="${C_BYLW}未开启 (当前: ${cc_now})${C_RST}"
+    fi
+
+    if [ -n "$def_dev" ] && [ -n "$live_qdisc" ]; then
+        if [[ "$live_qdisc" =~ (^|[,(])fq([,)]|$) ]]; then
+            fq_real="${C_BGRN}默认 ${qdisc_def} · ${def_dev} 实时 ${live_qdisc}${C_RST}"
+        elif [ "$qdisc_def" = "fq" ]; then
+            fq_real="${C_BYLW}默认 ${qdisc_def} · ${def_dev} 当前 ${live_qdisc} (重启生效)${C_RST}"
+        else
+            fq_real="${C_BYLW}默认 ${qdisc_def} · ${def_dev} 实时 ${live_qdisc}${C_RST}"
+        fi
+    else
+        fq_real="默认 ${qdisc_def}"
+    fi
+
     echo -e "  ${C_DIM}系统:${C_RST} ${OS_PRETTY}"
-    echo -e "  ${C_DIM}网络:${C_RST} ${cc_now} + ${qdisc_now}"
+    echo -e "  ${C_DIM}BBR :${C_RST} ${bbr_real}"
+    echo -e "  ${C_DIM}FQ  :${C_RST} ${fq_real}"
     format_dns_lines
     echo -e "  ${C_DIM}主机:${C_RST} $(hostname 2>/dev/null || echo unknown)"
     echo -e "  ${C_DIM}磁盘:${C_RST} ${disk_now}"
