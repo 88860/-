@@ -1500,6 +1500,10 @@ filter_safe_purge_pkgs() {
             warn "跳过卸载 ${p} (模拟依赖校验未通过)"
             continue
         fi
+        if grep -qE '^Inst ' <<< "$sim_out"; then
+            warn "跳过卸载 ${p} (会触发安装替代新包)"
+            continue
+        fi
         if grep -E '^(Purg|Remv) ' <<< "$sim_out" | awk '{print $2}' | grep -qE "$protected_rx"; then
             warn "跳过卸载 ${p} (会连带移除关键网络/系统组件)"
             continue
@@ -1597,8 +1601,8 @@ step_provider_agent_prune() {
             systemctl disable --now uniagent.service telescoped.service telescope.service hostguard.service hss.service >/dev/null 2>&1 || true
         fi
         pkill -9 -f 'telescope|hostguard|uniagent|agentguard' >/dev/null 2>&1 || true
-        if is_pkg_installed hostguard; then
-            apt-get purge -y hostguard >/dev/null 2>&1 || true
+        if is_pkg_installed hostguard && ! apt-get purge -s --no-install-recommends hostguard 2>/dev/null | grep -qE '^Inst '; then
+            apt-get purge -y --no-install-recommends hostguard >/dev/null 2>&1 || true
         fi
         rm -rf /usr/local/telescope /usr/local/hostguard /usr/local/uniagent /opt/uniagent /usr/local/hss /usr/local/agentguard /etc/init.d/hostguard 2>/dev/null || true
         strip_cron_pattern 'telescope|hostguard|uniagent|agentguard'
@@ -1832,7 +1836,7 @@ step_pkg_prune_and_upgrade() {
     fi
 
     run_logged "刷新软件源索引" apt-get update -q || true
-    run_logged "执行系统全局升级" apt-get full-upgrade -y -q \
+    run_logged "执行系统已有包就地升级" apt-get upgrade -y -q --without-new-pkgs \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold" || true
 
@@ -2319,7 +2323,7 @@ step_deep_cleanup() {
             fi
         done
     fi
-    run_logged "清理孤立依赖包" apt-get autoremove --purge -y -q || true
+    run_logged "清理孤立依赖包" apt-get autoremove --purge -y -q --no-install-recommends || true
     apt-get clean -qq >/dev/null 2>&1 || true
     find /var/lib/apt/lists -type f ! -name 'lock' -delete 2>/dev/null || true
     find /var/lib/apt/periodic /var/cache/apt -type f ! -name 'lock' -delete 2>/dev/null || true
