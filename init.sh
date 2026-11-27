@@ -2075,7 +2075,6 @@ apply_sysctl_optimizations() {
     fi
 
     local -a sysctl_pairs=(
-        "net.core.somaxconn=4096"
         "net.core.netdev_max_backlog=4096"
         "net.core.rmem_max=${sock_max}"
         "net.core.wmem_max=${sock_max}"
@@ -2085,10 +2084,6 @@ apply_sysctl_optimizations() {
         "net.ipv4.udp_wmem_min=${udp_min}"
         "net.ipv4.tcp_max_syn_backlog=${syn_backlog}"
         "net.ipv4.ip_local_port_range=10000 65535"
-        "net.ipv4.tcp_timestamps=1"
-        "net.ipv4.tcp_sack=1"
-        "net.ipv4.tcp_window_scaling=1"
-        "net.ipv4.tcp_moderate_rcvbuf=1"
         "net.ipv4.tcp_fastopen=3"
         "net.ipv4.tcp_mtu_probing=1"
         "net.ipv4.tcp_slow_start_after_idle=0"
@@ -2098,9 +2093,6 @@ apply_sysctl_optimizations() {
         "net.ipv4.tcp_keepalive_intvl=30"
         "net.ipv4.tcp_keepalive_probes=3"
         "net.ipv4.tcp_rfc1337=1"
-        "net.ipv4.tcp_syncookies=1"
-        "net.ipv4.icmp_echo_ignore_broadcasts=1"
-        "net.ipv4.icmp_ignore_bogus_error_responses=1"
         "net.ipv4.conf.all.accept_redirects=0"
         "net.ipv4.conf.default.accept_redirects=0"
         "net.ipv4.conf.all.send_redirects=0"
@@ -2111,9 +2103,6 @@ apply_sysctl_optimizations() {
         "vm.dirty_background_ratio=5"
         "vm.dirty_ratio=10"
         "fs.inotify.max_user_instances=1024"
-        "fs.suid_dumpable=0"
-        "fs.protected_hardlinks=1"
-        "fs.protected_symlinks=1"
         "kernel.kptr_restrict=1"
         "kernel.dmesg_restrict=1"
     )
@@ -2122,6 +2111,7 @@ apply_sysctl_optimizations() {
     fi
 
     local -a sysctl_min_pairs=(
+        "net.core.somaxconn=4096"
         "net.core.optmem_max=65536"
         "fs.inotify.max_user_watches=${inotify_watches}"
         "net.core.rmem_default=${default_buf}"
@@ -2160,6 +2150,12 @@ apply_sysctl_optimizations() {
     else
         sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_TARGET" >/dev/null 2>&1 || true
     fi
+    local rp=""
+    for rp in /proc/sys/net/ipv4/conf/*/accept_redirects /proc/sys/net/ipv4/conf/*/send_redirects /proc/sys/net/ipv6/conf/*/accept_redirects; do
+        if [ -w "$rp" ]; then
+            printf '0\n' > "$rp" 2>/dev/null || true
+        fi
+    done
     if [ "$changed" -eq 1 ]; then
         ok "sysctl 已写入并生效 (${SYSCTL_TARGET})"
     else
@@ -2223,12 +2219,12 @@ patch_logrotate_rsyslog() {
 }
 
 patch_sshd_config() {
-    local ssh_conf="/etc/ssh/sshd_config"
+    local ssh_conf="${1:-/etc/ssh/sshd_config}"
     [ -f "$ssh_conf" ] || return 0
     local ssh_body=$'UseDNS no\nGSSAPIAuthentication no\nClientAliveInterval 60\nClientAliveCountMax 3'
-    if upsert_block_file "$ssh_conf" "# >>> sys-opt-ssh >>>" "# <<< sys-opt-ssh <<<" "$ssh_body" '^[[:space:]]*Include[[:space:]]+'; then
+    if upsert_block_file "$ssh_conf" "# >>> sys-opt-ssh >>>" "# <<< sys-opt-ssh <<<" "$ssh_body" '^[[:space:]]*[^#[:space:]]'; then
         [ -d /run/sshd ] || mkdir -p /run/sshd 2>/dev/null || true
-        if command -v sshd >/dev/null 2>&1 && [ -d /run/sshd ] && ! sshd -t >/dev/null 2>&1; then
+        if command -v sshd >/dev/null 2>&1 && [ -d /run/sshd ] && ! sshd -t -f "$ssh_conf" >/dev/null 2>&1; then
             warn "sshd -t 检查未通过，未重载 SSH，请检查 ${ssh_conf}"
             return 0
         fi
@@ -2246,20 +2242,60 @@ patch_module_blacklist() {
         info "容器环境跳过内核黑名单"
         return 0
     fi
+    local -a bl_mods=(
+        snd snd_pcm snd_timer soundcore pcspkr snd_pcsp
+        snd_hda_intel bluetooth btusb uvcvideo firewire_ohci firewire_core rtsx_usb_ms
+    )
+    local -a active_mods=()
+    local m=""
+    for m in "${bl_mods[@]}"; do
+        if grep -qw "$m" /proc/modules 2>/dev/null || { command -v modinfo >/dev/null 2>&1 && modinfo -n "$m" >/dev/null 2>&1; }; then
+            active_mods+=("$m")
+        fi
+    done
+    if [ "${#active_mods[@]}" -eq 0 ]; then
+        ok "内核无冗余桌面驱动，无需写入黑名单"
+        return 0
+    fi
+
     mkdir -p /etc/modprobe.d
     local bl_conf="/etc/modprobe.d/blacklist-server.conf"
     if [ ! -f "$bl_conf" ] && [ -f /etc/modprobe.d/blacklist.conf ]; then
         bl_conf="/etc/modprobe.d/blacklist.conf"
     fi
 
-    local bl_body
-    bl_body=$'blacklist snd\nblacklist snd_pcm\nblacklist snd_timer\nblacklist soundcore\nblacklist pcspkr\nblacklist snd_pcsp\nblacklist snd_hda_intel\nblacklist bluetooth\nblacklist btusb\nblacklist uvcvideo\nblacklist firewire_ohci\nblacklist firewire_core\nblacklist rtsx_usb_ms\ninstall btusb /bin/true\ninstall uvcvideo /bin/true'
+    local bl_body=""
+    for m in "${active_mods[@]}"; do
+        bl_body="${bl_body}blacklist ${m}"$'\n'
+        if [ "$m" = "btusb" ] || [ "$m" = "uvcvideo" ]; then
+            bl_body="${bl_body}install ${m} /bin/true"$'\n'
+        fi
+    done
+    bl_body="${bl_body%$'\n'}"
     if upsert_block_file "$bl_conf" "# >>> sys-opt-blacklist >>>" "# <<< sys-opt-blacklist <<<" "$bl_body"; then
         INITRAMFS_DIRTY=1
         ok "已更新无用驱动黑名单 (${bl_conf})"
     else
         ok "驱动黑名单已是最新"
     fi
+}
+
+strip_journald_dropin_conflicts() {
+    local df="" tmp_f="" ret=1
+    ensure_tmp_work
+    for df in /etc/systemd/journald.conf.d/*.conf; do
+        if [ ! -f "$df" ] || [ -L "$df" ]; then
+            continue
+        fi
+        if grep -qE '^[[:space:]]*(Compress|SystemMaxUse|SystemMaxFileSize|SystemMaxFiles|RuntimeMaxUse|RuntimeMaxFileSize|RuntimeMaxFiles|MaxRetentionSec|ForwardToSyslog)[[:space:]]*=' "$df" 2>/dev/null; then
+            tmp_f="$(mktemp "${TMP_WORK}/jdrop.XXXXXX")"
+            grep -vE '^[[:space:]]*(Compress|SystemMaxUse|SystemMaxFileSize|SystemMaxFiles|RuntimeMaxUse|RuntimeMaxFileSize|RuntimeMaxFiles|MaxRetentionSec|ForwardToSyslog)[[:space:]]*=' "$df" > "$tmp_f" || true
+            if atomic_replace_if_changed "$tmp_f" "$df" 0644; then
+                ret=0
+            fi
+        fi
+    done
+    return $ret
 }
 
 step_system_optimize() {
@@ -2275,16 +2311,20 @@ step_system_optimize() {
         if ! is_pkg_installed rsyslog; then
             j_opts+=("ForwardToSyslog=no")
         fi
+        local j_changed=0
+        if strip_journald_dropin_conflicts; then
+            j_changed=1
+        fi
         if upsert_ini_section /etc/systemd/journald.conf "[Journal]" "${j_opts[@]}"; then
+            j_changed=1
+        fi
+        if [ "$j_changed" -eq 1 ]; then
             if [ "$HAS_SYSTEMD" -eq 1 ]; then
                 systemctl restart systemd-journald >/dev/null 2>&1 || true
             fi
             ok "journald 已限容 (32M)"
         else
             ok "journald 配置已就绪"
-        fi
-        if compgen -G "/etc/systemd/journald.conf.d/*.conf" >/dev/null 2>&1; then
-            warn "检测到 journald.conf.d 存在外部覆盖项"
         fi
     fi
 
@@ -2296,11 +2336,11 @@ step_system_optimize() {
     fi
 
     if [ -f /etc/systemd/system.conf ]; then
-        if upsert_ini_section /etc/systemd/system.conf "[Manager]" "DefaultLimitNOFILE=1024:524288"; then
+        if upsert_ini_section /etc/systemd/system.conf "[Manager]" "DefaultLimitNOFILE=65536:524288"; then
             if [ "$HAS_SYSTEMD" -eq 1 ]; then
-                systemctl daemon-reload >/dev/null 2>&1 || true
+                systemctl daemon-reexec >/dev/null 2>&1 || systemctl daemon-reload >/dev/null 2>&1 || true
             fi
-            ok "system.conf 已放开 DefaultLimitNOFILE"
+            ok "system.conf 已放开 DefaultLimitNOFILE (65536:524288)"
         else
             ok "system.conf 限额已就绪"
         fi
@@ -2308,7 +2348,7 @@ step_system_optimize() {
 
     if [ -f /etc/security/limits.conf ]; then
         local lim_body
-        lim_body=$'* soft nofile 524288\n* hard nofile 524288\nroot soft nofile 524288\nroot hard nofile 524288'
+        lim_body=$'* soft nofile 65536\n* hard nofile 524288\nroot soft nofile 65536\nroot hard nofile 524288'
         if upsert_block_file /etc/security/limits.conf "# >>> sys-opt-limits >>>" "# <<< sys-opt-limits <<<" "$lim_body" '^[[:space:]]*#[[:space:]]*End of file'; then
             ok "limits.conf 已放开文件句柄上限"
         else
@@ -2316,7 +2356,7 @@ step_system_optimize() {
         fi
     fi
 
-    patch_sshd_config
+    patch_sshd_config /etc/ssh/sshd_config
 
     if [ -f /etc/logrotate.d/rsyslog ]; then
         if patch_logrotate_rsyslog /etc/logrotate.d/rsyslog; then
