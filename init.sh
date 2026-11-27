@@ -1733,16 +1733,18 @@ prune_old_kernels() {
     current="$(uname -r)"
     latest="$(get_latest_installed_kernel)"
 
-    if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
-        warn "检测到更新内核 ${latest}，当前运行 ${current}，跳过卸载"
-        return 0
-    fi
-
     local -A protected=()
     local p=""
     while IFS= read -r p; do
         [ -n "$p" ] && protected["$p"]=1
     done < <(get_protected_kernel_pkgs "$current")
+
+    if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
+        warn "检测到已安装新内核 ${latest}，保留当前 ${current} 与新内核至重启"
+        while IFS= read -r p; do
+            [ -n "$p" ] && protected["$p"]=1
+        done < <(get_protected_kernel_pkgs "$latest")
+    fi
 
     local -a cleanup=()
     local st=""
@@ -1752,6 +1754,9 @@ prune_old_kernels() {
         [ -n "${protected[$p]:-}" ] && continue
         is_versioned_kernel_pkg "$p" || continue
         if dpkg-query -W -f='${Depends} ${Recommends}\n' "$p" 2>/dev/null | grep -qF "$current"; then
+            continue
+        fi
+        if [ -n "$latest" ] && dpkg-query -W -f='${Depends} ${Recommends}\n' "$p" 2>/dev/null | grep -qF "$latest"; then
             continue
         fi
         cleanup+=("$p")
@@ -1858,10 +1863,14 @@ step_pkg_prune_and_upgrade() {
        grep -qE '^(openssh-server|openssh-client|systemd|udev|kmod|sudo|iproute2|ifupdown|ifupdown2|netplan\.io|dhcpcd-base|dhcpcd5|isc-dhcp-client|cloud-init|grub.*|initramfs-tools|amazon-ec2-net-utils|google-guest-agent|walinuxagent)$'; then
         warn "full-upgrade 可能移除关键系统/网络组件，降级为原地 upgrade"
         run_logged "执行安全就地升级" apt-get upgrade -y -q --without-new-pkgs \
+            -o APT::Install-Recommends=false \
+            -o APT::Install-Suggests=false \
             -o Dpkg::Options::="--force-confdef" \
             -o Dpkg::Options::="--force-confold" || true
     else
         run_logged "执行系统全局升级 (full-upgrade)" apt-get full-upgrade -y -q \
+            -o APT::Install-Recommends=false \
+            -o APT::Install-Suggests=false \
             -o Dpkg::Options::="--force-confdef" \
             -o Dpkg::Options::="--force-confold" || true
     fi
@@ -2523,6 +2532,14 @@ print_final_summary() {
     format_dns_lines
     echo -e "  ${C_DIM}主机:${C_RST} $(hostname 2>/dev/null || echo unknown)"
     echo -e "  ${C_DIM}磁盘:${C_RST} ${disk_now}"
+    if [ "$IS_CONTAINER" -eq 0 ]; then
+        local cur_k="" lat_k=""
+        cur_k="$(uname -r)"
+        lat_k="$(get_latest_installed_kernel)"
+        if [ -n "$lat_k" ] && [ "$lat_k" != "$cur_k" ]; then
+            info "已升级新内核 ${lat_k}，双内核暂共存；重启后再运行一次可清理 ${cur_k} 释放空间"
+        fi
+    fi
 }
 
 prompt_enter_reboot() {
