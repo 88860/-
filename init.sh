@@ -1638,36 +1638,65 @@ step_provider_agent_prune() {
     fi
 }
 
+is_versioned_kernel_pkg() {
+    local pkg="$1"
+    [[ "$pkg" =~ ^linux-([a-z0-9.-]+-)?(image|image-unsigned|headers|modules|modules-extra)-[0-9]+\.[0-9]+ ]]
+}
+
 get_protected_kernel_pkgs() {
     local current="$1"
-    local -a seeds=()
-    local -a queue=()
-    local -A seen=()
-    local p="" dep="" d=""
+    local -A installed=() deps_map=() seen=()
+    local -a pkgs=() queue=()
+    local st="" p="" dep="" d="" mod_owner=""
 
-    while IFS= read -r p; do
+    while IFS=$'\t' read -r st p dep; do
+        [ "$st" = "install ok installed" ] || continue
         [ -z "$p" ] && continue
+        pkgs+=("$p")
+        installed["$p"]=1
+        deps_map["$p"]="$dep"
         if [[ "$p" == *"$current"* ]]; then
-            seeds+=("$p")
+            seen["$p"]=1
+            queue+=("$p")
         fi
-    done < <(dpkg-query -W -f='${Package}\n' 'linux-*' 2>/dev/null || true)
+    done < <(dpkg-query -W -f='${Status}\t${Package}\t${Depends}, ${Recommends}\n' 'linux-*' 2>/dev/null || true)
 
-    for p in "${seeds[@]}"; do
-        queue+=("$p")
-        seen["$p"]=1
-    done
-
-    local idx=0
-    while [ "$idx" -lt "${#queue[@]}" ]; do
-        p="${queue[$idx]}"
-        idx=$((idx + 1))
-        dep="$(dpkg-query -W -f='${Depends}\n' "$p" 2>/dev/null || true)"
-        for d in $(tr ',|()' '\n' <<< "$dep" | awk '{print $1}'); do
-            [[ "$d" == linux-* ]] || continue
-            if [ -z "${seen[$d]:-}" ]; then
-                seen["$d"]=1
-                queue+=("$d")
+    if [ -d "/lib/modules/${current}" ]; then
+        mod_owner="$(dpkg-query -S "/lib/modules/${current}" 2>/dev/null | awk -F: '{print $1}' | tr ',' '\n' | awk '{$1=$1; if($0!="") print}' || true)"
+        for p in $mod_owner; do
+            if [ -n "${installed[$p]:-}" ] && [ -z "${seen[$p]:-}" ]; then
+                seen["$p"]=1
+                queue+=("$p")
             fi
+        done
+    fi
+
+    local changed=1
+    while [ "$changed" -eq 1 ]; do
+        changed=0
+        local idx=0
+        while [ "$idx" -lt "${#queue[@]}" ]; do
+            p="${queue[$idx]}"
+            idx=$((idx + 1))
+            for d in $(tr ',|()' '\n' <<< "${deps_map[$p]:-}" | awk '{print $1}'); do
+                [[ "$d" == linux-* ]] || continue
+                if [ -n "${installed[$d]:-}" ] && [ -z "${seen[$d]:-}" ]; then
+                    seen["$d"]=1
+                    queue+=("$d")
+                    changed=1
+                fi
+            done
+        done
+        for p in "${pkgs[@]}"; do
+            [ -z "${seen[$p]:-}" ] || continue
+            for d in $(tr ',|()' '\n' <<< "${deps_map[$p]:-}" | awk '{print $1}'); do
+                if [ -n "${seen[$d]:-}" ]; then
+                    seen["$p"]=1
+                    queue+=("$p")
+                    changed=1
+                    break
+                fi
+            done
         done
     done
 
@@ -1707,17 +1736,17 @@ prune_old_kernels() {
     done < <(get_protected_kernel_pkgs "$current")
 
     local -a cleanup=()
-    while IFS= read -r p; do
+    local st=""
+    while IFS=$'\t' read -r st p; do
+        [ "$st" = "install ok installed" ] || continue
         [ -z "$p" ] && continue
-        [[ "$p" =~ ^linux-(libc-dev|base|compiler|kbuild|doc|perf|source|tools|sysctl-defaults|cpupower) ]] && continue
         [ -n "${protected[$p]:-}" ] && continue
+        is_versioned_kernel_pkg "$p" || continue
         if dpkg-query -W -f='${Depends} ${Recommends}\n' "$p" 2>/dev/null | grep -qF "$current"; then
             continue
         fi
-        if [[ "$p" =~ (image|headers|modules|xanmod|liquorix|bbr|zen|surface|mainline|custom) ]]; then
-            cleanup+=("$p")
-        fi
-    done < <(dpkg-query -W -f='${Package}\n' 'linux-*' 2>/dev/null || true)
+        cleanup+=("$p")
+    done < <(dpkg-query -W -f='${Status}\t${Package}\n' 'linux-*' 2>/dev/null || true)
 
     if [ "${#cleanup[@]}" -eq 0 ]; then
         ok "无多余旧内核"
@@ -2278,11 +2307,14 @@ step_deep_cleanup() {
 
     sync
     local -a auto_sim=()
+    local cur_kern=""
+    cur_kern="$(uname -r)"
     mapfile -t auto_sim < <(apt-get autoremove -s 2>/dev/null | awk '/^Remv /{print $2}' || true)
     if [ "${#auto_sim[@]}" -gt 0 ]; then
         local ap=""
         for ap in "${auto_sim[@]}"; do
-            if [[ "$ap" =~ ^(openssh-|netplan|ifupdown|dhcpcd|isc-dhcp|iproute2|iputils-|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs|cloud-init|grub|efibootmgr) ]]; then
+            if [[ "$ap" =~ ^(openssh-|netplan|ifupdown|dhcpcd|isc-dhcp|iproute2|iputils-|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs|cloud-init|grub|efibootmgr) ]] || \
+               { [[ "$ap" =~ ^linux-(image|image-unsigned|headers|modules|modules-extra|generic|virtual|aws|gcp|azure|oracle|kvm|xanmod|liquorix) ]] && { [[ "$ap" == *"$cur_kern"* ]] || ! is_versioned_kernel_pkg "$ap"; }; }; then
                 apt-mark manual "$ap" >/dev/null 2>&1 || true
             fi
         done
