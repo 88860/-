@@ -1457,6 +1457,7 @@ pin_critical_packages() {
         iproute2 iputils-ping netbase nftables iptables ethtool
         ca-certificates curl wget gnupg sudo udev systemd kmod
         initramfs-tools cloud-init python3-yaml linux-base linux-sysctl-defaults
+        chrony systemd-timesyncd logrotate
         efibootmgr open-iscsi amazon-ec2-net-utils google-guest-agent walinuxagent
     )
     if [ "$VIRT_TYPE" = "microsoft" ]; then
@@ -1491,7 +1492,7 @@ filter_safe_purge_pkgs() {
     local extra_prot=""
     [ "$VIRT_TYPE" = "microsoft" ] && extra_prot="${extra_prot}|hyperv-daemons"
     [ "$NM_ACTIVE" -eq 1 ] && extra_prot="${extra_prot}|network-manager"
-    local protected_rx="^(openssh-server|openssh-client|netplan\\.io|netplan-generator|networkd-dispatcher|libnetplan.*|ifupdown|ifupdown2|dhcpcd-base|dhcpcd5|isc-dhcp-client|isc-dhcp-common|systemd-resolved|iproute2|iputils-ping|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs-tools|cloud-init|python3-yaml|open-iscsi|grub.*|shim.*|efibootmgr|amazon-ec2-net-utils|google-guest-agent|walinuxagent|linux-image-.*|linux-headers-.*|linux-modules-.*${extra_prot})\$"
+    local protected_rx="^(openssh-server|openssh-client|netplan\\.io|netplan-generator|networkd-dispatcher|libnetplan.*|ifupdown|ifupdown2|dhcpcd-base|dhcpcd5|isc-dhcp-client|isc-dhcp-common|systemd-resolved|iproute2|iputils-ping|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs-tools|cloud-init|python3-yaml|chrony|systemd-timesyncd|logrotate|open-iscsi|grub.*|shim.*|efibootmgr|amazon-ec2-net-utils|google-guest-agent|walinuxagent|linux-image-.*|linux-headers-.*|linux-modules-.*${extra_prot})\$"
     local p="" sim_out=""
     for p in "${raw_pkgs[@]}"; do
         [ -z "$p" ] && continue
@@ -1709,15 +1710,8 @@ get_protected_kernel_pkgs() {
     done
 }
 
-prune_old_kernels() {
-    if [ "$IS_CONTAINER" -eq 1 ]; then
-        info "容器环境跳过内核清理"
-        return 0
-    fi
-
-    local current latest="" mod_dir="" ver=""
-    current="$(uname -r)"
-
+get_latest_installed_kernel() {
+    local latest="" mod_dir="" ver=""
     for mod_dir in /lib/modules/[0-9]*; do
         [ -d "$mod_dir" ] || continue
         ver="$(basename "$mod_dir")"
@@ -1727,6 +1721,18 @@ prune_old_kernels() {
             fi
         fi
     done
+    printf '%s' "$latest"
+}
+
+prune_old_kernels() {
+    if [ "$IS_CONTAINER" -eq 1 ]; then
+        info "容器环境跳过内核清理"
+        return 0
+    fi
+
+    local current latest=""
+    current="$(uname -r)"
+    latest="$(get_latest_installed_kernel)"
 
     if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
         warn "检测到更新内核 ${latest}，当前运行 ${current}，跳过卸载"
@@ -1836,9 +1842,21 @@ step_pkg_prune_and_upgrade() {
     fi
 
     run_logged "刷新软件源索引" apt-get update -q || true
-    run_logged "执行系统已有包就地升级" apt-get upgrade -y -q --without-new-pkgs \
-        -o Dpkg::Options::="--force-confdef" \
-        -o Dpkg::Options::="--force-confold" || true
+    local full_sim=""
+    full_sim="$(apt-get full-upgrade -s -y -q \
+        -o APT::Install-Recommends=false \
+        -o APT::Install-Suggests=false 2>&1 || true)"
+    if grep -E '^(Remv|Purg) ' <<< "$full_sim" | awk '{print $2}' | \
+       grep -qE '^(openssh-server|openssh-client|systemd|ifupdown|ifupdown2|netplan\.io|grub.*|initramfs-tools)$'; then
+        warn "full-upgrade 可能移除关键系统/网络组件，降级为原地 upgrade"
+        run_logged "执行安全就地升级" apt-get upgrade -y -q --without-new-pkgs \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" || true
+    else
+        run_logged "执行系统全局升级 (full-upgrade)" apt-get full-upgrade -y -q \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" || true
+    fi
 
     if [ "${#DNS_PUSH_SOURCES[@]}" -gt 0 ] || [ ! -s /etc/resolv.conf ] || \
        { [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf 2>/dev/null | grep -qE 'systemd/resolve|resolvconf'; }; then
@@ -2302,7 +2320,7 @@ step_system_optimize() {
     patch_module_blacklist
 
     if [ "$INITRAMFS_DIRTY" -eq 1 ] && [ "$IS_CONTAINER" -eq 0 ] && command -v update-initramfs >/dev/null 2>&1; then
-        run_logged "更新 initramfs" update-initramfs -u || true
+        run_logged "更新 initramfs" update-initramfs -u -k all || true
     fi
 }
 
@@ -2311,14 +2329,16 @@ step_deep_cleanup() {
 
     sync
     local -a auto_sim=()
-    local cur_kern=""
+    local cur_kern="" latest_kern=""
     cur_kern="$(uname -r)"
+    latest_kern="$(get_latest_installed_kernel)"
     mapfile -t auto_sim < <(apt-get autoremove -s 2>/dev/null | awk '/^Remv /{print $2}' || true)
     if [ "${#auto_sim[@]}" -gt 0 ]; then
         local ap=""
         for ap in "${auto_sim[@]}"; do
-            if [[ "$ap" =~ ^(openssh-|netplan|ifupdown|dhcpcd|isc-dhcp|iproute2|iputils-|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs|cloud-init|grub|efibootmgr) ]] || \
-               { [[ "$ap" =~ ^linux-(image|image-unsigned|headers|modules|modules-extra|generic|virtual|aws|gcp|azure|oracle|kvm|xanmod|liquorix) ]] && { [[ "$ap" == *"$cur_kern"* ]] || ! is_versioned_kernel_pkg "$ap"; }; }; then
+            if [[ "$ap" =~ ^(openssh-|netplan|ifupdown|dhcpcd|isc-dhcp|iproute2|iputils-|netbase|systemd|udev|kmod|sudo|ca-certificates|initramfs|cloud-init|grub|efibootmgr|chrony|logrotate) ]] || \
+               { [[ "$ap" =~ ^linux-(image|image-unsigned|headers|modules|modules-extra|generic|virtual|aws|gcp|azure|oracle|kvm|xanmod|liquorix) ]] && \
+                 { [[ "$ap" == *"$cur_kern"* ]] || { [ -n "$latest_kern" ] && [[ "$ap" == *"$latest_kern"* ]]; } || ! is_versioned_kernel_pkg "$ap"; }; }; then
                 apt-mark manual "$ap" >/dev/null 2>&1 || true
             fi
         done
@@ -2339,14 +2359,15 @@ step_deep_cleanup() {
         for mdir in /lib/modules/[0-9]*; do
             [ -d "$mdir" ] || continue
             mver="$(basename "$mdir")"
-            if [ "$mver" != "$cur_k" ] && [ ! -f "/boot/vmlinuz-${mver}" ]; then
+            if [ "$mver" != "$cur_k" ] && [ ! -f "/boot/vmlinuz-${mver}" ] && \
+               ! dpkg-query -S "/lib/modules/${mver}" >/dev/null 2>&1; then
                 rm -rf "$mdir" 2>/dev/null || true
             fi
         done
     fi
 
     find /etc /var /opt /srv /root /home \
-        -type d \( -name '.git' -o -name '.ssh' -o -path '/var/lib/docker' -o -path '/var/lib/containerd' -o -path '/var/lib/dpkg' -o -path '/var/lib/apt' -o -path '/etc/ssl' \) -prune -o \
+        -type d \( -name '.git' -o -name '.ssh' -o -path '/var/lib/docker' -o -path '/var/lib/containerd' -o -path '/var/lib/dpkg' -o -path '/var/lib/apt' -o -path '/var/lib/cloud' -o -path '/etc/ssl' \) -prune -o \
         -type f \( -name '*.dpkg-old' -o -name '*.dpkg-dist' -o -name '*.dpkg-new' \
         -o -name '*.ucf-old' -o -name '*.ucf-dist' -o -name '*.ucf-new' \
         -o -name '*.bak' -o -name '*.old' -o -name '*.tmp' \
