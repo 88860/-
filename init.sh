@@ -643,9 +643,11 @@ if push_host:
 PYEOF
         return 0
     fi
-    if grep -qE '^[[:space:]]*dhcp[46]:[[:space:]]*(true|yes)' "$file" 2>/dev/null; then
+    if grep -qE '^[[:space:]]*(dhcp[46]|accept-ra):[[:space:]]*(true|yes)' "$file" 2>/dev/null; then
         grep -qE '^[[:space:]]*use-dns:[[:space:]]*(false|no)' "$file" 2>/dev/null || echo "DNS"
-        grep -qE '^[[:space:]]*use-hostname:[[:space:]]*(false|no)' "$file" 2>/dev/null || echo "HOST"
+        if grep -qE '^[[:space:]]*dhcp[46]:[[:space:]]*(true|yes)' "$file" 2>/dev/null; then
+            grep -qE '^[[:space:]]*use-hostname:[[:space:]]*(false|no)' "$file" 2>/dev/null || echo "HOST"
+        fi
     fi
 }
 
@@ -1602,9 +1604,6 @@ step_provider_agent_prune() {
             systemctl disable --now uniagent.service telescoped.service telescope.service hostguard.service hss.service >/dev/null 2>&1 || true
         fi
         pkill -9 -f 'telescope|hostguard|uniagent|agentguard' >/dev/null 2>&1 || true
-        if is_pkg_installed hostguard && ! apt-get purge -s --no-install-recommends hostguard 2>/dev/null | grep -qE '^Inst '; then
-            apt-get purge -y --no-install-recommends hostguard >/dev/null 2>&1 || true
-        fi
         rm -rf /usr/local/telescope /usr/local/hostguard /usr/local/uniagent /opt/uniagent /usr/local/hss /usr/local/agentguard /etc/init.d/hostguard 2>/dev/null || true
         strip_cron_pattern 'telescope|hostguard|uniagent|agentguard'
         ok "已清理华为云监控/主机安全代理"
@@ -1773,17 +1772,24 @@ prune_old_kernels() {
     fi
 }
 
+purge_rc_packages() {
+    local quiet="${1:-0}"
+    local -a rc_pkgs=()
+    mapfile -t rc_pkgs < <(dpkg-query -W -f='${Status}\t${binary:Package}\n' 2>/dev/null | awk -F'\t' '$1=="deinstall ok config-files"{print $2}' || true)
+    if [ "${#rc_pkgs[@]}" -gt 0 ]; then
+        if [ "$quiet" -eq 1 ]; then
+            apt-get purge -y -q --no-install-recommends "${rc_pkgs[@]}" >/dev/null 2>&1 || true
+        else
+            run_logged "清理 ${#rc_pkgs[@]} 个 rc 残留包" apt-get purge -y -q --no-install-recommends "${rc_pkgs[@]}" || true
+        fi
+    fi
+}
+
 step_pkg_prune_and_upgrade() {
     step_title "3/7" "移除监控、精简包与全局升级"
 
     pin_critical_packages
-    step_provider_agent_prune
-
-    local -a rc_pkgs=()
-    mapfile -t rc_pkgs < <(dpkg -l 2>/dev/null | awk '/^rc/ {print $2}')
-    if [ "${#rc_pkgs[@]}" -gt 0 ]; then
-        run_logged "清理 ${#rc_pkgs[@]} 个 rc 残留包" apt-get purge -y -q "${rc_pkgs[@]}" || true
-    fi
+    purge_rc_packages 0
 
     local -a raw_candidates=(
         man-db manpages manpages-dev groff-base info install-info
@@ -1802,7 +1808,7 @@ step_pkg_prune_and_upgrade() {
         azuremonitoragent omsagent mdsd linode-longview
         ovh-rtm-binaries ovh-rtm-metrics-toolkit noderig beamium
         aliyun-assist aliyun_assist ecs-assist tat-agent tat_agent
-        bce-agent bcm-agent uagent vultr-agent
+        hostguard bce-agent bcm-agent uagent vultr-agent
     )
     if [ "$VIRT_TYPE" != "microsoft" ]; then
         raw_candidates+=(hyperv-daemons)
@@ -1841,13 +1847,15 @@ step_pkg_prune_and_upgrade() {
         ok "无待卸载冗余软件包"
     fi
 
+    step_provider_agent_prune
+
     run_logged "刷新软件源索引" apt-get update -q || true
     local full_sim=""
     full_sim="$(apt-get full-upgrade -s -y -q \
         -o APT::Install-Recommends=false \
         -o APT::Install-Suggests=false 2>&1 || true)"
     if grep -E '^(Remv|Purg) ' <<< "$full_sim" | awk '{print $2}' | \
-       grep -qE '^(openssh-server|openssh-client|systemd|ifupdown|ifupdown2|netplan\.io|grub.*|initramfs-tools)$'; then
+       grep -qE '^(openssh-server|openssh-client|systemd|udev|kmod|sudo|iproute2|ifupdown|ifupdown2|netplan\.io|dhcpcd-base|dhcpcd5|isc-dhcp-client|cloud-init|grub.*|initramfs-tools|amazon-ec2-net-utils|google-guest-agent|walinuxagent)$'; then
         warn "full-upgrade 可能移除关键系统/网络组件，降级为原地 upgrade"
         run_logged "执行安全就地升级" apt-get upgrade -y -q --without-new-pkgs \
             -o Dpkg::Options::="--force-confdef" \
@@ -1917,6 +1925,7 @@ step_service_prune() {
         snapd.service snapd.socket snapd.seeded.service
         apport.service whoopsie.service fwupd.service
         motd-news.timer ua-timer.timer ubuntu-advantage.service
+        esm-cache.service apt-news.service ua-reboot-cmds.service
         qemu-guest-agent.service
         do-agent.service droplet-agent.service
         oracle-cloud-agent.service osms-agent.service
@@ -2344,6 +2353,7 @@ step_deep_cleanup() {
         done
     fi
     run_logged "清理孤立依赖包" apt-get autoremove --purge -y -q --no-install-recommends || true
+    purge_rc_packages 1
     apt-get clean -qq >/dev/null 2>&1 || true
     find /var/lib/apt/lists -type f ! -name 'lock' -delete 2>/dev/null || true
     find /var/lib/apt/periodic /var/cache/apt -type f ! -name 'lock' -delete 2>/dev/null || true
@@ -2367,7 +2377,7 @@ step_deep_cleanup() {
     fi
 
     find /etc /var /opt /srv /root /home \
-        -type d \( -name '.git' -o -name '.ssh' -o -path '/var/lib/docker' -o -path '/var/lib/containerd' -o -path '/var/lib/dpkg' -o -path '/var/lib/apt' -o -path '/var/lib/cloud' -o -path '/etc/ssl' \) -prune -o \
+        -type d \( -name '.git' -o -name '.ssh' -o -path '/var/lib/docker' -o -path '/var/lib/containerd' -o -path '/var/lib/dpkg' -o -path '/var/lib/apt' -o -path '/var/lib/cloud' -o -path '/etc/ssl' -o -path '/etc/letsencrypt' \) -prune -o \
         -type f \( -name '*.dpkg-old' -o -name '*.dpkg-dist' -o -name '*.dpkg-new' \
         -o -name '*.ucf-old' -o -name '*.ucf-dist' -o -name '*.ucf-new' \
         -o -name '*.bak' -o -name '*.old' -o -name '*.tmp' \
